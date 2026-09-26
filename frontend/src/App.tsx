@@ -106,7 +106,7 @@ export default function App() {
     if (thread) {
       thread.scrollTop = thread.scrollHeight
     }
-  }, [messages, liveSegments])
+  }, [messages, liveSegments, error])
 
   async function openConversation(conversationId: string) {
     conversationIdRef.current = conversationId
@@ -216,6 +216,8 @@ export default function App() {
       if (controller.signal.aborted) {
         return
       }
+      setLiveSegments([])
+      setMessages((current) => current.slice(0, -1))
       setError(errorMessage(cause, "Could not get a reply"))
     } finally {
       if (!controller.signal.aborted) {
@@ -306,7 +308,7 @@ export default function App() {
         </header>
 
         <div ref={threadRef} className="flex flex-1 flex-col gap-3 overflow-y-auto px-6 py-6">
-          {messages.length === 0 && liveSegments.length === 0 ? (
+          {messages.length === 0 && liveSegments.length === 0 && error === null ? (
             <p className="m-auto max-w-sm text-center text-sm text-stone-500">
               Send a message to start a conversation. It will be named from your first prompt.
             </p>
@@ -322,12 +324,16 @@ export default function App() {
                   <ToolPill key={segment.id} text={segment.text} status={segment.status} />
                 ),
               )}
+              {error ? (
+                <p role="alert" className="text-sm text-red-300">
+                  {error}
+                </p>
+              ) : null}
             </>
           )}
         </div>
 
         <form onSubmit={onSubmit} className="border-t border-stone-800 px-6 py-4">
-          {error ? <p className="mb-2 text-sm text-red-300">{error}</p> : null}
           <div className="flex items-end gap-3">
             <textarea
               value={draft}

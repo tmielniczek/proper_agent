@@ -6,7 +6,11 @@
 
 **Status:** ready-for-agent
 
-- [ ] When the provider rejects the API key, the thread shows an error and the failed turn is not saved
-- [ ] When the provider rate-limits the request, the thread shows an error and the failed turn is not saved
-- [ ] After refresh, the conversation does not contain the prompt or any assistant text from that failed turn
-- [ ] The sidebar order and titles are unchanged by the failed turn
+- [x] When the provider rejects the API key, the thread shows an error and the failed turn is not saved
+- [x] When the provider rate-limits the request, the thread shows an error and the failed turn is not saved
+- [x] After refresh, the conversation does not contain the prompt or any assistant text from that failed turn
+- [x] The sidebar order and titles are unchanged by the failed turn
+
+## Comments
+
+Implemented. A rejected API key or a rate limit emits an SSE error, drops that turn's prompt and any partial assistant text, and leaves the sidebar order and titles as they were.

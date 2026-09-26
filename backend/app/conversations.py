@@ -15,7 +15,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app import db
 from app.db import get_session
-from app.llm import ToolCall, model_from_env
+from app.llm import ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
 from app.tools import display_text, run_tool
 
@@ -120,6 +120,8 @@ async def chat(
     session: AsyncSession = Depends(get_session),
 ) -> AsyncIterator[ServerSentEvent]:
     conversation = await _require_conversation(session, conversation_id)
+    previous_title = conversation.title
+    previous_updated_at = conversation.updated_at
     existing_user_messages = await session.exec(
         select(Message).where(
             Message.conversation_id == conversation_id,
@@ -157,7 +159,15 @@ async def chat(
     queue: asyncio.Queue[ServerSentEvent | None] = asyncio.Queue()
     run = _Run(user_message_id=user_message.id)
     run.task = asyncio.create_task(
-        _reply(conversation_id, turns, model, queue, run)
+        _reply(
+            conversation_id,
+            turns,
+            model,
+            queue,
+            run,
+            previous_title,
+            previous_updated_at,
+        )
     )
     _runs[conversation_id] = run
     try:
@@ -202,6 +212,8 @@ async def _reply(
     model: Any,
     queue: asyncio.Queue[ServerSentEvent | None],
     run: _Run,
+    previous_title: str,
+    previous_updated_at: datetime,
 ) -> None:
     assert db.session_factory is not None
     async with db.session_factory() as session:
@@ -278,6 +290,16 @@ async def _reply(
         except asyncio.CancelledError:
             _clear_cancellation()
             raise
+        except ProviderRejection as rejection:
+            await _drop_rejected_turn(
+                session,
+                conversation,
+                run.user_message_id,
+                previous_title,
+                previous_updated_at,
+            )
+            run.completed = True
+            queue.put_nowait(ServerSentEvent(event="error", data={"error": str(rejection)}))
         finally:
             queue.put_nowait(None)
 
@@ -294,6 +316,28 @@ def _clear_cancellation() -> None:
         return
     while task.cancelling():
         task.uncancel()
+
+
+async def _drop_rejected_turn(
+    session: AsyncSession,
+    conversation: Conversation,
+    user_message_id: str,
+    previous_title: str,
+    previous_updated_at: datetime,
+) -> None:
+    user_message = await session.get(Message, user_message_id)
+    if user_message is not None:
+        result = await session.exec(
+            select(Message).where(Message.conversation_id == conversation.id)
+        )
+        cutoff = _as_utc(user_message.created_at)
+        for message in result.all():
+            if _as_utc(message.created_at) >= cutoff:
+                await session.delete(message)
+    conversation.title = previous_title
+    conversation.updated_at = previous_updated_at
+    session.add(conversation)
+    await session.commit()
 
 
 async def _drop_messages_after(

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from openai import AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI
 
 from app.tools import TOOL_SCHEMAS
 
@@ -16,6 +16,10 @@ class ToolCall:
     id: str
     name: str
     arguments: dict
+
+
+class ProviderRejection(Exception):
+    pass
 
 
 class LanguageModel(Protocol):
@@ -49,6 +53,16 @@ class OpenAILanguageModel:
         self._client = AsyncOpenAI(api_key=api_key)
 
     async def stream(self, messages: list[dict]) -> AsyncIterator[str | ToolCall]:
+        try:
+            async for event in self._events(messages):
+                yield event
+        except APIStatusError as exc:
+            rejection = _provider_rejection(exc)
+            if rejection is None:
+                raise
+            raise rejection from exc
+
+    async def _events(self, messages: list[dict]) -> AsyncIterator[str | ToolCall]:
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
@@ -89,6 +103,14 @@ class OpenAILanguageModel:
             close = getattr(response, "close", None)
             if close is not None:
                 await asyncio.shield(close())
+
+
+def _provider_rejection(exc: APIStatusError) -> ProviderRejection | None:
+    if exc.status_code == 401:
+        return ProviderRejection("The API key was rejected")
+    if exc.status_code == 429:
+        return ProviderRejection("The request was rate-limited")
+    return None
 
 
 def _tool_arguments(raw: str) -> dict:
