@@ -82,15 +82,27 @@ function parseSseBlock(block: string): StreamEvent | null {
   return { event, data }
 }
 
+export function cancelConversation(conversationId: string): Promise<void> {
+  return fetch(`/api/conversations/${conversationId}/cancel`, { method: "POST" }).then(
+    (response) => {
+      if (!response.ok) {
+        throw new Error("Could not cancel the reply")
+      }
+    },
+  )
+}
+
 export async function sendPrompt(
   conversationId: string,
   prompt: string,
   handlers: ChatHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch(`/api/conversations/${conversationId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt }),
+    signal,
   })
   if (!response.ok || !response.body) {
     throw new Error("Could not get a reply")
@@ -138,6 +150,9 @@ export async function sendPrompt(
   buffer += decoder.decode()
   if (buffer.trim() !== "") {
     handleBlock(buffer)
+  }
+  if (signal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError")
   }
   if (!sawDone) {
     throw new Error("Could not get a reply")

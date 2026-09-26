@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react"
 import {
+  cancelConversation,
   createConversation,
   getConversation,
   listConversations,
@@ -89,6 +90,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([])
   const threadRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const conversationIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     listConversations()
@@ -106,6 +109,7 @@ export default function App() {
   }, [messages, liveSegments])
 
   async function openConversation(conversationId: string) {
+    conversationIdRef.current = conversationId
     setSelectedId(conversationId)
     setError(null)
     try {
@@ -118,6 +122,7 @@ export default function App() {
   }
 
   function startNewChat() {
+    conversationIdRef.current = null
     setSelectedId(null)
     setMessages([])
     setLiveSegments([])
@@ -130,6 +135,7 @@ export default function App() {
     if (prompt === "" || sending) {
       return
     }
+    conversationIdRef.current = selectedId
     setSending(true)
     setError(null)
     setDraft("")
@@ -138,43 +144,67 @@ export default function App() {
       ...current,
       { id: crypto.randomUUID(), role: "user", content: prompt, created_at: "" },
     ])
+    const controller = new AbortController()
+    abortRef.current = controller
     try {
       const conversationId = selectedId ?? (await createConversation()).id
+      if (controller.signal.aborted) {
+        setMessages((current) => current.slice(0, -1))
+        return
+      }
+      conversationIdRef.current = conversationId
       setSelectedId(conversationId)
-      await sendPrompt(conversationId, prompt, {
-        onDelta: (text) => {
-          setLiveSegments((current) => {
-            const last = current[current.length - 1]
-            if (last?.kind === "text") {
-              return [...current.slice(0, -1), { ...last, text: `${last.text}${text}` }]
+      await sendPrompt(
+        conversationId,
+        prompt,
+        {
+          onDelta: (text) => {
+            if (controller.signal.aborted) {
+              return
             }
-            return [...current, { kind: "text", id: crypto.randomUUID(), text }]
-          })
-        },
-        onToolStart: (tool, displayText) => {
-          setLiveSegments((current) => [
-            ...current,
-            { kind: "pill", id: crypto.randomUUID(), tool, text: displayText, status: "running" },
-          ])
-        },
-        onToolEnd: (tool) => {
-          setLiveSegments((current) => {
-            const index = current.findIndex(
-              (segment) =>
-                segment.kind === "pill" && segment.tool === tool && segment.status === "running",
-            )
-            if (index === -1) {
-              return current
+            setLiveSegments((current) => {
+              const last = current[current.length - 1]
+              if (last?.kind === "text") {
+                return [...current.slice(0, -1), { ...last, text: `${last.text}${text}` }]
+              }
+              return [...current, { kind: "text", id: crypto.randomUUID(), text }]
+            })
+          },
+          onToolStart: (tool, displayText) => {
+            if (controller.signal.aborted) {
+              return
             }
-            const next = current.slice()
-            const pill = next[index]
-            if (pill?.kind === "pill") {
-              next[index] = { ...pill, status: "complete" }
+            setLiveSegments((current) => [
+              ...current,
+              { kind: "pill", id: crypto.randomUUID(), tool, text: displayText, status: "running" },
+            ])
+          },
+          onToolEnd: (tool) => {
+            if (controller.signal.aborted) {
+              return
             }
-            return next
-          })
+            setLiveSegments((current) => {
+              const index = current.findIndex(
+                (segment) =>
+                  segment.kind === "pill" && segment.tool === tool && segment.status === "running",
+              )
+              if (index === -1) {
+                return current
+              }
+              const next = current.slice()
+              const pill = next[index]
+              if (pill?.kind === "pill") {
+                next[index] = { ...pill, status: "complete" }
+              }
+              return next
+            })
+          },
         },
-      })
+        controller.signal,
+      )
+      if (controller.signal.aborted) {
+        return
+      }
       const [nextConversations, detail] = await Promise.all([
         listConversations(),
         getConversation(conversationId),
@@ -183,7 +213,36 @@ export default function App() {
       setLiveSegments([])
       setMessages(detail.messages)
     } catch (cause: unknown) {
+      if (controller.signal.aborted) {
+        return
+      }
       setError(errorMessage(cause, "Could not get a reply"))
+    } finally {
+      if (!controller.signal.aborted) {
+        setSending(false)
+      }
+    }
+  }
+
+  async function stopGeneration() {
+    const conversationId = conversationIdRef.current
+    abortRef.current?.abort()
+    setLiveSegments([])
+    if (conversationId === null) {
+      setSending(false)
+      return
+    }
+    try {
+      await cancelConversation(conversationId)
+      const [nextConversations, detail] = await Promise.all([
+        listConversations(),
+        getConversation(conversationId),
+      ])
+      setConversations(nextConversations)
+      setLiveSegments([])
+      setMessages(detail.messages)
+    } catch (cause: unknown) {
+      setError(errorMessage(cause, "Could not cancel the reply"))
     } finally {
       setSending(false)
     }
@@ -279,13 +338,23 @@ export default function App() {
               aria-label="Message"
               className="min-h-16 flex-1 resize-none rounded-xl border border-stone-700 bg-stone-900 px-4 py-3 text-sm outline-none placeholder:text-stone-500 focus:border-stone-500"
             />
-            <button
-              type="submit"
-              disabled={sending || draft.trim() === ""}
-              className="rounded-xl bg-stone-100 px-4 py-3 text-sm font-medium text-stone-950 disabled:opacity-40"
-            >
-              {sending ? "Sending" : "Send"}
-            </button>
+            {sending ? (
+              <button
+                type="button"
+                onClick={() => void stopGeneration()}
+                className="rounded-xl border border-stone-600 px-4 py-3 text-sm font-medium text-stone-100"
+              >
+                Cancel
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={draft.trim() === ""}
+                className="rounded-xl bg-stone-100 px-4 py-3 text-sm font-medium text-stone-950 disabled:opacity-40"
+              >
+                Send
+              </button>
+            )}
           </div>
         </form>
       </main>

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
@@ -54,35 +55,40 @@ class OpenAILanguageModel:
             tools=TOOL_SCHEMAS,
             stream=True,
         )
-        pending: dict[int, dict[str, str]] = {}
-        async for chunk in response:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            text = getattr(delta, "content", None)
-            if text:
-                yield text
-            for tool_delta in getattr(delta, "tool_calls", None) or []:
-                slot = pending.setdefault(
-                    tool_delta.index, {"id": "", "name": "", "arguments": ""}
-                )
-                if getattr(tool_delta, "id", None):
-                    slot["id"] = tool_delta.id
-                function = getattr(tool_delta, "function", None)
-                if function is None:
+        try:
+            pending: dict[int, dict[str, str]] = {}
+            async for chunk in response:
+                if not chunk.choices:
                     continue
-                if getattr(function, "name", None):
-                    slot["name"] = function.name
-                arguments = getattr(function, "arguments", None)
-                if arguments:
-                    slot["arguments"] += arguments
-        for index in sorted(pending):
-            slot = pending[index]
-            yield ToolCall(
-                id=slot["id"],
-                name=slot["name"],
-                arguments=_tool_arguments(slot["arguments"]),
-            )
+                delta = chunk.choices[0].delta
+                text = getattr(delta, "content", None)
+                if text:
+                    yield text
+                for tool_delta in getattr(delta, "tool_calls", None) or []:
+                    slot = pending.setdefault(
+                        tool_delta.index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if getattr(tool_delta, "id", None):
+                        slot["id"] = tool_delta.id
+                    function = getattr(tool_delta, "function", None)
+                    if function is None:
+                        continue
+                    if getattr(function, "name", None):
+                        slot["name"] = function.name
+                    arguments = getattr(function, "arguments", None)
+                    if arguments:
+                        slot["arguments"] += arguments
+            for index in sorted(pending):
+                slot = pending[index]
+                yield ToolCall(
+                    id=slot["id"],
+                    name=slot["name"],
+                    arguments=_tool_arguments(slot["arguments"]),
+                )
+        finally:
+            close = getattr(response, "close", None)
+            if close is not None:
+                await asyncio.shield(close())
 
 
 def _tool_arguments(raw: str) -> dict:

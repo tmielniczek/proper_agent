@@ -6,7 +6,11 @@
 
 **Status:** ready-for-agent
 
-- [ ] While assistant text is streaming, Cancel stops the stream and clears the partial assistant text from the thread
-- [ ] While a tool pill is still running, Cancel stops the wait and clears the partial assistant text and the in-progress pill
-- [ ] After cancel, refreshing shows the user's prompt as the last message, with no partial assistant message and no unfinished tool result
-- [ ] The model request does not continue after cancel
+- [x] While assistant text is streaming, Cancel stops the stream and clears the partial assistant text from the thread
+- [x] While a tool pill is still running, Cancel stops the wait and clears the partial assistant text and the in-progress pill
+- [x] After cancel, refreshing shows the user's prompt as the last message, with no partial assistant message and no unfinished tool result
+- [x] The model request does not continue after cancel
+
+## Comments
+
+Implemented. Cancel aborts the model stream and any tool wait, clears partial assistant text and the in-progress pill, and leaves that turn saved as the user's prompt.
