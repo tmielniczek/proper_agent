@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react"
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react"
 import {
   createConversation,
   getConversation,
@@ -23,6 +23,7 @@ export default function App() {
   const [draft, setDraft] = useState("")
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const threadRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     listConversations()
@@ -31,6 +32,13 @@ export default function App() {
         setError(errorMessage(cause, "Could not load conversations"))
       })
   }, [])
+
+  useEffect(() => {
+    const thread = threadRef.current
+    if (thread) {
+      thread.scrollTop = thread.scrollHeight
+    }
+  }, [messages])
 
   async function openConversation(conversationId: string) {
     setSelectedId(conversationId)
@@ -57,19 +65,33 @@ export default function App() {
     }
     setSending(true)
     setError(null)
+    setDraft("")
+    const pendingAssistantId = crypto.randomUUID()
+    setMessages((current) => [
+      ...current,
+      { id: crypto.randomUUID(), role: "user", content: prompt, created_at: "" },
+      { id: pendingAssistantId, role: "assistant", content: "", created_at: "" },
+    ])
     try {
       const conversationId = selectedId ?? (await createConversation()).id
       setSelectedId(conversationId)
-      await sendPrompt(conversationId, prompt)
+      await sendPrompt(conversationId, prompt, (text) => {
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === pendingAssistantId
+              ? { ...message, content: `${message.content ?? ""}${text}` }
+              : message,
+          ),
+        )
+      })
       const [nextConversations, detail] = await Promise.all([
         listConversations(),
         getConversation(conversationId),
       ])
       setConversations(nextConversations)
       setMessages(detail.messages)
-      setDraft("")
     } catch (cause: unknown) {
-      setError(errorMessage(cause, "Could not save the prompt"))
+      setError(errorMessage(cause, "Could not get a reply"))
     } finally {
       setSending(false)
     }
@@ -132,20 +154,27 @@ export default function App() {
           </h1>
         </header>
 
-        <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-6 py-6">
+        <div ref={threadRef} className="flex flex-1 flex-col gap-3 overflow-y-auto px-6 py-6">
           {messages.length === 0 ? (
             <p className="m-auto max-w-sm text-center text-sm text-stone-500">
               Send a message to start a conversation. It will be named from your first prompt.
             </p>
           ) : (
-            messages.map((message) => (
-              <div
-                key={message.id}
-                className="ml-auto max-w-[40rem] rounded-2xl bg-stone-800 px-4 py-3 text-sm leading-6"
-              >
-                <p className="whitespace-pre-wrap">{message.content}</p>
-              </div>
-            ))
+            messages.map((message) => {
+              const isUser = message.role === "user"
+              return (
+                <div
+                  key={message.id}
+                  className={`max-w-[40rem] rounded-2xl px-4 py-3 text-sm leading-6 ${
+                    isUser
+                      ? "ml-auto bg-stone-800"
+                      : "mr-auto border border-stone-800 bg-stone-900"
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap">{message.content}</p>
+                </div>
+              )
+            })
           )}
         </div>
 

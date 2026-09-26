@@ -1,15 +1,15 @@
-import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, Field
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db import get_session
+from app.llm import model_from_env
 from app.models import Conversation, Message
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -101,12 +101,13 @@ async def get_conversation(
     return ConversationDetail(**summary.model_dump(), messages=messages)
 
 
-@router.post("/{conversation_id}/chat")
+@router.post("/{conversation_id}/chat", response_class=EventSourceResponse)
 async def chat(
     conversation_id: str,
     body: ChatIn,
+    request: Request,
     session: AsyncSession = Depends(get_session),
-) -> StreamingResponse:
+) -> AsyncIterator[ServerSentEvent]:
     conversation = await _require_conversation(session, conversation_id)
     existing_user_messages = await session.exec(
         select(Message).where(
@@ -118,7 +119,7 @@ async def chat(
         conversation.title = body.prompt[:30]
 
     now = next_timestamp()
-    message = Message(
+    user_message = Message(
         id=str(uuid4()),
         conversation_id=conversation_id,
         role="user",
@@ -126,19 +127,44 @@ async def chat(
         created_at=now,
     )
     conversation.updated_at = now
-    session.add(message)
+    session.add(user_message)
     session.add(conversation)
     await session.commit()
 
-    return StreamingResponse(
-        _done_event(message.id),
-        media_type="text/event-stream",
+    history = await session.exec(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
     )
+    turns = [
+        {"role": message.role, "content": message.content or ""}
+        for message in history.all()
+    ]
 
+    model = request.app.state.language_model
+    if model is None:
+        model = model_from_env()
+        request.app.state.language_model = model
 
-async def _done_event(message_id: str) -> AsyncIterator[str]:
-    payload = json.dumps({"message_id": message_id})
-    yield f"event: done\ndata: {payload}\n\n"
+    parts: list[str] = []
+    async for chunk in model.stream(turns):
+        parts.append(chunk)
+        yield ServerSentEvent(event="delta", data={"text": chunk})
+
+    saved_at = next_timestamp()
+    assistant_message = Message(
+        id=str(uuid4()),
+        conversation_id=conversation_id,
+        role="assistant",
+        content="".join(parts),
+        created_at=saved_at,
+    )
+    conversation.updated_at = saved_at
+    session.add(assistant_message)
+    session.add(conversation)
+    await session.commit()
+
+    yield ServerSentEvent(event="done", data={"message_id": assistant_message.id})
 
 
 async def _require_conversation(session: AsyncSession, conversation_id: str) -> Conversation:

@@ -6,8 +6,12 @@
 
 **Status:** ready-for-agent
 
-- [ ] Sending a prompt streams the assistant's reply into the thread as it is generated
-- [ ] When generation finishes, refreshing the conversation still shows the complete assistant message
-- [ ] The conversation moves to the top of the sidebar when the reply completes
-- [ ] A follow-up prompt in the same conversation is answered with the earlier messages still in context
-- [ ] The reply is plain text from the model configured in the environment, and no tool status is shown
+- [x] Sending a prompt streams the assistant's reply into the thread as it is generated
+- [x] When generation finishes, refreshing the conversation still shows the complete assistant message
+- [x] The conversation moves to the top of the sidebar when the reply completes
+- [x] A follow-up prompt in the same conversation is answered with the earlier messages still in context
+- [x] The reply is plain text from the model configured in the environment, and no tool status is shown
+
+## Comments
+
+Implemented. Deltas are appended in the thread as they arrive, and the full assistant message is saved when generation finishes. The model name is `MODEL_NAME` or `LLM_MODEL`.

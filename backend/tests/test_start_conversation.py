@@ -2,7 +2,7 @@ PROMPT = "What is the current temperature in Berlin and calculate 2+2?"
 TITLE = "What is the current temperatur"
 
 
-def test_first_prompt_names_conversation_and_stores_only_the_user_message(client):
+def test_first_prompt_names_the_conversation_and_stores_the_prompt(client):
     created = client.post("/api/conversations")
     assert created.status_code == 200
     conversation_id = created.json()["id"]
@@ -23,7 +23,8 @@ def test_first_prompt_names_conversation_and_stores_only_the_user_message(client
     detail = client.get(f"/api/conversations/{conversation_id}")
     assert detail.status_code == 200
     assert [(message["role"], message["content"]) for message in detail.json()["messages"]] == [
-        ("user", PROMPT)
+        ("user", PROMPT),
+        ("assistant", "stub reply"),
     ]
 
 
@@ -60,6 +61,13 @@ def test_conversations_are_listed_most_recently_active_first(client):
     detail = client.get(f"/api/conversations/{older}")
     assert [message["content"] for message in detail.json()["messages"]] == [
         "alpha prompt that is long enough",
+        "stub reply",
         "follow up on alpha",
+        "stub reply",
     ]
-    assert [message["role"] for message in detail.json()["messages"]] == ["user", "user"]
+    assert [message["role"] for message in detail.json()["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
