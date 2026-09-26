@@ -8,6 +8,70 @@ import {
   type Conversation,
 } from "./api.ts"
 
+const TOOL_LABELS: Record<string, string> = {
+  get_weather: "Checking weather...",
+  search_database: "Searching database...",
+  calculator: "Calculating...",
+}
+
+type LiveSegment =
+  | { kind: "text"; id: string; text: string }
+  | { kind: "pill"; id: string; tool: string; text: string; status: "running" | "complete" }
+
+function ToolPill({ text, status }: { text: string; status: "running" | "complete" }) {
+  const running = status === "running"
+  return (
+    <p
+      role="status"
+      data-status={status}
+      aria-label={running ? text : `${text} complete`}
+      className={`mr-auto inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${
+        running
+          ? "animate-pulse border-amber-800 bg-amber-950/50 text-amber-100"
+          : "border-stone-700 bg-stone-900 text-stone-300"
+      }`}
+    >
+      <span aria-hidden="true">{running ? "●" : "✓"}</span>
+      {text}
+    </p>
+  )
+}
+
+function MessageBubble({ role, content }: { role: string; content: string }) {
+  const isUser = role === "user"
+  return (
+    <div
+      className={`max-w-[40rem] rounded-2xl px-4 py-3 text-sm leading-6 ${
+        isUser ? "ml-auto bg-stone-800" : "mr-auto border border-stone-800 bg-stone-900"
+      }`}
+    >
+      <p className="whitespace-pre-wrap">{content}</p>
+    </div>
+  )
+}
+
+function PersistedTurn({ message }: { message: ChatMessage }) {
+  if (message.role === "tool") {
+    return null
+  }
+  const pills = (message.tool_calls ?? []).map((call) => ({
+    id: call.id,
+    text: TOOL_LABELS[call.function.name] ?? call.function.name,
+  }))
+  const text = message.content ?? ""
+  if (text === "" && pills.length === 0) {
+    return null
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {text !== "" ? <MessageBubble role={message.role} content={text} /> : null}
+      {pills.map((pill) => (
+        <ToolPill key={pill.id} text={pill.text} status="complete" />
+      ))}
+    </div>
+  )
+}
+
 function displayTitle(title: string): string {
   return title.trim() === "" ? "New chat" : title
 }
@@ -23,6 +87,7 @@ export default function App() {
   const [draft, setDraft] = useState("")
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([])
   const threadRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -38,13 +103,14 @@ export default function App() {
     if (thread) {
       thread.scrollTop = thread.scrollHeight
     }
-  }, [messages])
+  }, [messages, liveSegments])
 
   async function openConversation(conversationId: string) {
     setSelectedId(conversationId)
     setError(null)
     try {
       const detail = await getConversation(conversationId)
+      setLiveSegments([])
       setMessages(detail.messages)
     } catch (cause: unknown) {
       setError(errorMessage(cause, "Could not open that conversation"))
@@ -54,6 +120,7 @@ export default function App() {
   function startNewChat() {
     setSelectedId(null)
     setMessages([])
+    setLiveSegments([])
     setError(null)
     setDraft("")
   }
@@ -66,29 +133,54 @@ export default function App() {
     setSending(true)
     setError(null)
     setDraft("")
-    const pendingAssistantId = crypto.randomUUID()
+    setLiveSegments([])
     setMessages((current) => [
       ...current,
       { id: crypto.randomUUID(), role: "user", content: prompt, created_at: "" },
-      { id: pendingAssistantId, role: "assistant", content: "", created_at: "" },
     ])
     try {
       const conversationId = selectedId ?? (await createConversation()).id
       setSelectedId(conversationId)
-      await sendPrompt(conversationId, prompt, (text) => {
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === pendingAssistantId
-              ? { ...message, content: `${message.content ?? ""}${text}` }
-              : message,
-          ),
-        )
+      await sendPrompt(conversationId, prompt, {
+        onDelta: (text) => {
+          setLiveSegments((current) => {
+            const last = current[current.length - 1]
+            if (last?.kind === "text") {
+              return [...current.slice(0, -1), { ...last, text: `${last.text}${text}` }]
+            }
+            return [...current, { kind: "text", id: crypto.randomUUID(), text }]
+          })
+        },
+        onToolStart: (tool, displayText) => {
+          setLiveSegments((current) => [
+            ...current,
+            { kind: "pill", id: crypto.randomUUID(), tool, text: displayText, status: "running" },
+          ])
+        },
+        onToolEnd: (tool) => {
+          setLiveSegments((current) => {
+            const index = current.findIndex(
+              (segment) =>
+                segment.kind === "pill" && segment.tool === tool && segment.status === "running",
+            )
+            if (index === -1) {
+              return current
+            }
+            const next = current.slice()
+            const pill = next[index]
+            if (pill?.kind === "pill") {
+              next[index] = { ...pill, status: "complete" }
+            }
+            return next
+          })
+        },
       })
       const [nextConversations, detail] = await Promise.all([
         listConversations(),
         getConversation(conversationId),
       ])
       setConversations(nextConversations)
+      setLiveSegments([])
       setMessages(detail.messages)
     } catch (cause: unknown) {
       setError(errorMessage(cause, "Could not get a reply"))
@@ -155,26 +247,23 @@ export default function App() {
         </header>
 
         <div ref={threadRef} className="flex flex-1 flex-col gap-3 overflow-y-auto px-6 py-6">
-          {messages.length === 0 ? (
+          {messages.length === 0 && liveSegments.length === 0 ? (
             <p className="m-auto max-w-sm text-center text-sm text-stone-500">
               Send a message to start a conversation. It will be named from your first prompt.
             </p>
           ) : (
-            messages.map((message) => {
-              const isUser = message.role === "user"
-              return (
-                <div
-                  key={message.id}
-                  className={`max-w-[40rem] rounded-2xl px-4 py-3 text-sm leading-6 ${
-                    isUser
-                      ? "ml-auto bg-stone-800"
-                      : "mr-auto border border-stone-800 bg-stone-900"
-                  }`}
-                >
-                  <p className="whitespace-pre-wrap">{message.content}</p>
-                </div>
-              )
-            })
+            <>
+              {messages.map((message) => (
+                <PersistedTurn key={message.id} message={message} />
+              ))}
+              {liveSegments.map((segment) =>
+                segment.kind === "text" ? (
+                  <MessageBubble key={segment.id} role="assistant" content={segment.text} />
+                ) : (
+                  <ToolPill key={segment.id} text={segment.text} status={segment.status} />
+                ),
+              )}
+            </>
           )}
         </div>
 

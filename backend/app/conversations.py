@@ -1,5 +1,7 @@
+import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -9,8 +11,9 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db import get_session
-from app.llm import model_from_env
+from app.llm import ToolCall, model_from_env
 from app.models import Conversation, Message
+from app.tools import display_text, run_tool
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -37,6 +40,8 @@ class MessageOut(BaseModel):
     id: str
     role: str
     content: str | None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
     created_at: str
 
 
@@ -88,15 +93,7 @@ async def get_conversation(
         .where(Message.conversation_id == conversation_id)
         .order_by(Message.created_at.asc())
     )
-    messages = [
-        MessageOut(
-            id=message.id,
-            role=message.role,
-            content=message.content,
-            created_at=message.created_at.isoformat(),
-        )
-        for message in result.all()
-    ]
+    messages = [_message_out(message) for message in result.all()]
     summary = _conversation_out(conversation)
     return ConversationDetail(**summary.model_dump(), messages=messages)
 
@@ -136,35 +133,113 @@ async def chat(
         .where(Message.conversation_id == conversation_id)
         .order_by(Message.created_at.asc())
     )
-    turns = [
-        {"role": message.role, "content": message.content or ""}
-        for message in history.all()
-    ]
+    turns = [_turn(message) for message in history.all()]
 
     model = request.app.state.language_model
     if model is None:
         model = model_from_env()
         request.app.state.language_model = model
 
-    parts: list[str] = []
-    async for chunk in model.stream(turns):
-        parts.append(chunk)
-        yield ServerSentEvent(event="delta", data={"text": chunk})
+    while True:
+        parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        async for event in model.stream(turns):
+            if isinstance(event, ToolCall):
+                tool_calls.append(event)
+                continue
+            parts.append(event)
+            yield ServerSentEvent(event="delta", data={"text": event})
 
-    saved_at = next_timestamp()
-    assistant_message = Message(
-        id=str(uuid4()),
-        conversation_id=conversation_id,
-        role="assistant",
-        content="".join(parts),
-        created_at=saved_at,
+        if not tool_calls:
+            saved_at = next_timestamp()
+            assistant_message = Message(
+                id=str(uuid4()),
+                conversation_id=conversation_id,
+                role="assistant",
+                content="".join(parts),
+                created_at=saved_at,
+            )
+            conversation.updated_at = saved_at
+            session.add(assistant_message)
+            session.add(conversation)
+            await session.commit()
+            yield ServerSentEvent(event="done", data={"message_id": assistant_message.id})
+            return
+
+        saved_at = next_timestamp()
+        assistant_message = Message(
+            id=str(uuid4()),
+            conversation_id=conversation_id,
+            role="assistant",
+            content="".join(parts) or None,
+            tool_calls=json.dumps([_stored_tool_call(call) for call in tool_calls]),
+            created_at=saved_at,
+        )
+        conversation.updated_at = saved_at
+        session.add(assistant_message)
+        session.add(conversation)
+        await session.commit()
+        turns.append(_turn(assistant_message))
+
+        for call in tool_calls:
+            yield ServerSentEvent(
+                event="tool_start",
+                data={"tool": call.name, "display_text": display_text(call.name)},
+            )
+            result = await run_tool(call.name, call.arguments)
+            yield ServerSentEvent(event="tool_end", data={"tool": call.name})
+            tool_saved_at = next_timestamp()
+            tool_message = Message(
+                id=str(uuid4()),
+                conversation_id=conversation_id,
+                role="tool",
+                content=json.dumps(result),
+                tool_call_id=call.id,
+                created_at=tool_saved_at,
+            )
+            conversation.updated_at = tool_saved_at
+            session.add(tool_message)
+            session.add(conversation)
+            await session.commit()
+            turns.append(_turn(tool_message))
+
+
+def _message_out(message: Message) -> MessageOut:
+    return MessageOut(
+        id=message.id,
+        role=message.role,
+        content=message.content,
+        tool_calls=json.loads(message.tool_calls) if message.tool_calls else None,
+        tool_call_id=message.tool_call_id,
+        created_at=message.created_at.isoformat(),
     )
-    conversation.updated_at = saved_at
-    session.add(assistant_message)
-    session.add(conversation)
-    await session.commit()
 
-    yield ServerSentEvent(event="done", data={"message_id": assistant_message.id})
+
+def _stored_tool_call(call: ToolCall) -> dict[str, Any]:
+    return {
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": json.dumps(call.arguments),
+        },
+    }
+
+
+def _turn(message: Message) -> dict:
+    if message.role == "tool":
+        return {
+            "role": "tool",
+            "tool_call_id": message.tool_call_id,
+            "content": message.content or "",
+        }
+    if message.tool_calls:
+        return {
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": json.loads(message.tool_calls),
+        }
+    return {"role": message.role, "content": message.content or ""}
 
 
 async def _require_conversation(session: AsyncSession, conversation_id: str) -> Conversation:

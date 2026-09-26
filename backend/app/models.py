@@ -21,4 +21,6 @@ class Message(SQLModel, table=True):
     conversation_id: str = Field(foreign_key="conversations.id", ondelete="CASCADE")
     role: str
     content: str | None = None
+    tool_calls: str | None = None
+    tool_call_id: str | None = None
     created_at: datetime = Field(sa_type=DateTime(timezone=True))

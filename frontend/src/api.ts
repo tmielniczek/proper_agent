@@ -5,11 +5,22 @@ export type Conversation = {
   updated_at: string
 }
 
+export type ToolCallRecord = {
+  id: string
+  type: string
+  function: {
+    name: string
+    arguments: string
+  }
+}
+
 export type ChatMessage = {
   id: string
   role: string
   content: string | null
   created_at: string
+  tool_calls?: ToolCallRecord[] | null
+  tool_call_id?: string | null
 }
 
 type ConversationDetail = Conversation & {
@@ -43,7 +54,13 @@ export function getConversation(conversationId: string): Promise<ConversationDet
 
 type StreamEvent = {
   event: string
-  data: { text?: string; error?: string }
+  data: { text?: string; error?: string; tool?: string; display_text?: string }
+}
+
+export type ChatHandlers = {
+  onDelta: (text: string) => void
+  onToolStart: (tool: string, displayText: string) => void
+  onToolEnd: (tool: string) => void
 }
 
 function parseSseBlock(block: string): StreamEvent | null {
@@ -68,7 +85,7 @@ function parseSseBlock(block: string): StreamEvent | null {
 export async function sendPrompt(
   conversationId: string,
   prompt: string,
-  onDelta: (text: string) => void,
+  handlers: ChatHandlers,
 ): Promise<void> {
   const response = await fetch(`/api/conversations/${conversationId}/chat`, {
     method: "POST",
@@ -90,7 +107,13 @@ export async function sendPrompt(
       return
     }
     if (parsed.event === "delta" && parsed.data.text) {
-      onDelta(parsed.data.text)
+      handlers.onDelta(parsed.data.text)
+    }
+    if (parsed.event === "tool_start" && parsed.data.tool) {
+      handlers.onToolStart(parsed.data.tool, parsed.data.display_text ?? parsed.data.tool)
+    }
+    if (parsed.event === "tool_end" && parsed.data.tool) {
+      handlers.onToolEnd(parsed.data.tool)
     }
     if (parsed.event === "error") {
       throw new Error(parsed.data.error ?? "Could not get a reply")

@@ -159,7 +159,11 @@ def test_reply_is_plain_text_from_the_model_named_in_the_environment(
     assert recorded["create"]["model"] == "gpt-5-nano"
     assert recorded["create"]["messages"] == [{"role": "user", "content": "Say hello"}]
     assert recorded["create"]["stream"] is True
-    assert "tools" not in recorded["create"]
+    assert [tool["function"]["name"] for tool in recorded["create"]["tools"]] == [
+        "get_weather",
+        "search_database",
+        "calculator",
+    ]
     assert [(name, payload["text"]) for name, payload in events if name == "delta"] == [
         ("delta", "Plain"),
         ("delta", " text"),

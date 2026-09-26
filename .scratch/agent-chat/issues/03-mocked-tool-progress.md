@@ -6,13 +6,17 @@
 
 **Status:** ready-for-agent
 
-- [ ] A `get_weather` call shows an inline pill reading `Checking weather...` with a pulse until the tool finishes
-- [ ] A `search_database` call shows a pill reading `Searching database...`
-- [ ] A `calculator` call shows a pill reading `Calculating...`
-- [ ] Each tool waits between 1 and 10 seconds before the agent continues
-- [ ] When the tool finishes, the pill shows complete and the assistant's answer continues streaming
-- [ ] Weather returns a sunny 21° forecast with 45% humidity for the requested location
-- [ ] Search returns one mock record that includes the query
-- [ ] The calculator returns the value of a safe basic expression, or 42 when it cannot evaluate it
-- [ ] After refresh, the conversation still contains the tool call, the tool result, and the final answer
-- [ ] A later turn can use the tool results already stored in the conversation
+- [x] A `get_weather` call shows an inline pill reading `Checking weather...` with a pulse until the tool finishes
+- [x] A `search_database` call shows a pill reading `Searching database...`
+- [x] A `calculator` call shows a pill reading `Calculating...`
+- [x] Each tool waits between 1 and 10 seconds before the agent continues
+- [x] When the tool finishes, the pill shows complete and the assistant's answer continues streaming
+- [x] Weather returns a sunny 21° forecast with 45% humidity for the requested location
+- [x] Search returns one mock record that includes the query
+- [x] The calculator returns the value of a safe basic expression, or 42 when it cannot evaluate it
+- [x] After refresh, the conversation still contains the tool call, the tool result, and the final answer
+- [x] A later turn can use the tool results already stored in the conversation
+
+## Comments
+
+Implemented. Tool calls stream `tool_start` / `tool_end`, wait 1–10 seconds, then the answer continues. The call, the mock result, and the final answer stay in the conversation for later turns.

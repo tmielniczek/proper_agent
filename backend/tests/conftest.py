@@ -4,13 +4,11 @@ from fastapi.testclient import TestClient
 
 class RecordingModel:
     def __init__(self) -> None:
-        self.replies: list[list[str]] = [["stub reply"]]
-        self.calls: list[list[dict[str, str]]] = []
+        self.replies: list[list[object]] = [["stub reply"]]
+        self.calls: list[list[dict]] = []
 
-    async def stream(self, messages: list[dict[str, str]]):
-        self.calls.append(
-            [{"role": message["role"], "content": message["content"]} for message in messages]
-        )
+    async def stream(self, messages: list[dict]):
+        self.calls.append([dict(message) for message in messages])
         chunks = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         for chunk in chunks:
             yield chunk

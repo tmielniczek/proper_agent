@@ -1,13 +1,24 @@
+import json
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from openai import AsyncOpenAI
 
+from app.tools import TOOL_SCHEMAS
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict
+
 
 class LanguageModel(Protocol):
-    def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]: ...
+    def stream(self, messages: list[dict]) -> AsyncIterator[str | ToolCall]: ...
 
 
 def load_local_env() -> None:
@@ -36,15 +47,51 @@ class OpenAILanguageModel:
         self._model = model
         self._client = AsyncOpenAI(api_key=api_key)
 
-    async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+    async def stream(self, messages: list[dict]) -> AsyncIterator[str | ToolCall]:
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
+            tools=TOOL_SCHEMAS,
             stream=True,
         )
+        pending: dict[int, dict[str, str]] = {}
         async for chunk in response:
             if not chunk.choices:
                 continue
-            text = chunk.choices[0].delta.content
+            delta = chunk.choices[0].delta
+            text = getattr(delta, "content", None)
             if text:
                 yield text
+            for tool_delta in getattr(delta, "tool_calls", None) or []:
+                slot = pending.setdefault(
+                    tool_delta.index, {"id": "", "name": "", "arguments": ""}
+                )
+                if getattr(tool_delta, "id", None):
+                    slot["id"] = tool_delta.id
+                function = getattr(tool_delta, "function", None)
+                if function is None:
+                    continue
+                if getattr(function, "name", None):
+                    slot["name"] = function.name
+                arguments = getattr(function, "arguments", None)
+                if arguments:
+                    slot["arguments"] += arguments
+        for index in sorted(pending):
+            slot = pending[index]
+            yield ToolCall(
+                id=slot["id"],
+                name=slot["name"],
+                arguments=_tool_arguments(slot["arguments"]),
+            )
+
+
+def _tool_arguments(raw: str) -> dict:
+    if not raw:
+        return {}
+    try:
+        arguments = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(arguments, dict):
+        return {}
+    return arguments
