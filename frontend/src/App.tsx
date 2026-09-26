@@ -15,21 +15,72 @@ const TOOL_LABELS: Record<string, string> = {
   calculator: "Calculating...",
 }
 
+type PillTone = "tool" | "thinking"
+
 type LiveSegment =
   | { kind: "text"; id: string; text: string }
-  | { kind: "pill"; id: string; tool: string; text: string; status: "running" | "complete" }
+  | {
+      kind: "pill"
+      id: string
+      tone: PillTone
+      tool?: string
+      text: string
+      status: "running" | "complete"
+    }
 
-function ToolPill({ text, status }: { text: string; status: "running" | "complete" }) {
+function thinkingPill(): LiveSegment {
+  return {
+    kind: "pill",
+    id: crypto.randomUUID(),
+    tone: "thinking",
+    text: "Thinking...",
+    status: "running",
+  }
+}
+
+function isRunningThinking(segment: LiveSegment): boolean {
+  return segment.kind === "pill" && segment.tone === "thinking" && segment.status === "running"
+}
+
+function settleThinking(segments: LiveSegment[]): LiveSegment[] {
+  return segments.map((segment) =>
+    isRunningThinking(segment) ? { ...segment, status: "complete" } : segment,
+  )
+}
+
+function withThinking(segments: LiveSegment[]): LiveSegment[] {
+  if (segments.some(isRunningThinking)) {
+    return segments
+  }
+  return [...segments, thinkingPill()]
+}
+
+function StatusPill({
+  text,
+  status,
+  tone,
+}: {
+  text: string
+  status: "running" | "complete"
+  tone: PillTone
+}) {
   const running = status === "running"
+  const runningClass =
+    tone === "thinking"
+      ? "animate-pulse border-sky-700 bg-sky-950/60 text-sky-100"
+      : "animate-pulse border-amber-800 bg-amber-950/50 text-amber-100"
+  const doneClass =
+    tone === "thinking"
+      ? "border-sky-900 bg-sky-950/40 text-sky-300"
+      : "border-stone-700 bg-stone-900 text-stone-300"
   return (
     <p
       role="status"
       data-status={status}
+      data-tone={tone}
       aria-label={running ? text : `${text} complete`}
       className={`mr-auto inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${
-        running
-          ? "animate-pulse border-amber-800 bg-amber-950/50 text-amber-100"
-          : "border-stone-700 bg-stone-900 text-stone-300"
+        running ? runningClass : doneClass
       }`}
     >
       <span aria-hidden="true">{running ? "●" : "✓"}</span>
@@ -67,7 +118,7 @@ function PersistedTurn({ message }: { message: ChatMessage }) {
     <div className="flex flex-col gap-2">
       {text !== "" ? <MessageBubble role={message.role} content={text} /> : null}
       {pills.map((pill) => (
-        <ToolPill key={pill.id} text={pill.text} status="complete" />
+        <StatusPill key={pill.id} text={pill.text} status="complete" tone="tool" />
       ))}
     </div>
   )
@@ -139,7 +190,7 @@ export default function App() {
     setSending(true)
     setError(null)
     setDraft("")
-    setLiveSegments([])
+    setLiveSegments([thinkingPill()])
     setMessages((current) => [
       ...current,
       { id: crypto.randomUUID(), role: "user", content: prompt, created_at: "" },
@@ -175,8 +226,15 @@ export default function App() {
               return
             }
             setLiveSegments((current) => [
-              ...current,
-              { kind: "pill", id: crypto.randomUUID(), tool, text: displayText, status: "running" },
+              ...settleThinking(current),
+              {
+                kind: "pill",
+                id: crypto.randomUUID(),
+                tone: "tool",
+                tool,
+                text: displayText,
+                status: "running",
+              },
             ])
           },
           onToolEnd: (tool) => {
@@ -189,14 +247,14 @@ export default function App() {
                   segment.kind === "pill" && segment.tool === tool && segment.status === "running",
               )
               if (index === -1) {
-                return current
+                return withThinking(current)
               }
               const next = current.slice()
               const pill = next[index]
               if (pill?.kind === "pill") {
                 next[index] = { ...pill, status: "complete" }
               }
-              return next
+              return withThinking(next)
             })
           },
         },
@@ -205,6 +263,7 @@ export default function App() {
       if (controller.signal.aborted) {
         return
       }
+      setLiveSegments((current) => settleThinking(current))
       const [nextConversations, detail] = await Promise.all([
         listConversations(),
         getConversation(conversationId),
@@ -321,7 +380,12 @@ export default function App() {
                 segment.kind === "text" ? (
                   <MessageBubble key={segment.id} role="assistant" content={segment.text} />
                 ) : (
-                  <ToolPill key={segment.id} text={segment.text} status={segment.status} />
+                  <StatusPill
+                    key={segment.id}
+                    text={segment.text}
+                    status={segment.status}
+                    tone={segment.tone}
+                  />
                 ),
               )}
               {error ? (
