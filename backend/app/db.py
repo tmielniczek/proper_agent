@@ -33,6 +33,8 @@ def _add_message_tool_columns(sync_connection) -> None:
         sync_connection.execute(text("ALTER TABLE messages ADD COLUMN tool_calls TEXT"))
     if "tool_call_id" not in names:
         sync_connection.execute(text("ALTER TABLE messages ADD COLUMN tool_call_id TEXT"))
+    if "screen_notes" not in names:
+        sync_connection.execute(text("ALTER TABLE messages ADD COLUMN screen_notes TEXT"))
 
 
 async def init_db() -> None:

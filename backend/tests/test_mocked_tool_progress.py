@@ -38,6 +38,7 @@ def test_weather_call_shows_progress_then_saves_the_forecast(client, language_mo
         ("tool_end", {"tool": "get_weather"}),
     ]
     assert [name for name, _payload in events] == [
+        "prompt",
         "tool_start",
         "tool_end",
         "delta",
@@ -88,11 +89,12 @@ def test_database_search_shows_progress_and_saves_one_matching_record(client, la
     ) as response:
         events = sse_events(response.read().decode())
 
-    assert events[0] == (
+    assert events[0] == ("prompt", {"text": "Search for open invoices"})
+    assert events[1] == (
         "tool_start",
         {"tool": "search_database", "display_text": "Searching database..."},
     )
-    assert events[1][0] == "tool_end"
+    assert events[2][0] == "tool_end"
     detail = client.get(f"/api/conversations/{conversation_id}").json()
     assert json.loads(detail["messages"][2]["content"]) == {
         "results": [{"id": 101, "record": "Mock data result for query: open invoices"}],
@@ -114,7 +116,8 @@ def test_calculator_shows_progress_and_saves_the_value(client, language_model):
     ) as response:
         events = sse_events(response.read().decode())
 
-    assert events[0] == (
+    assert events[0] == ("prompt", {"text": "What is (2 + 3) * 4?"})
+    assert events[1] == (
         "tool_start",
         {"tool": "calculator", "display_text": "Calculating..."},
     )
@@ -203,7 +206,8 @@ def test_tool_calls_in_one_reply_run_at_the_same_time(client, language_model, mo
     assert state["max"] == 2
     starts = [payload for name, payload in events if name == "tool_start"]
     assert [payload["call_id"] for payload in starts] == ["call_berlin", "call_paris"]
-    assert [name for name, _payload in events[:4]] == [
+    assert [name for name, _payload in events[:5]] == [
+        "prompt",
         "tool_start",
         "tool_start",
         "tool_end",
@@ -297,7 +301,8 @@ def test_provider_stream_offers_tools_and_runs_a_streamed_tool_call(tmp_path, mo
     assert completions.calls[0]["tools"][0]["function"]["parameters"]["required"] == ["location"]
     assert completions.calls[0]["tools"][1]["function"]["parameters"]["required"] == ["query"]
     assert completions.calls[0]["tools"][2]["function"]["parameters"]["required"] == ["expression"]
-    assert events[0] == (
+    assert events[0] == ("prompt", {"text": "What is the weather in Berlin?"})
+    assert events[1] == (
         "tool_start",
         {"tool": "get_weather", "display_text": "Checking weather..."},
     )

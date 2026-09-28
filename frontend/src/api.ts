@@ -21,6 +21,7 @@ export type ChatMessage = {
   created_at: string
   tool_calls?: ToolCallRecord[] | null
   tool_call_id?: string | null
+  screen_notes?: string[] | null
 }
 
 type ConversationDetail = Conversation & {
@@ -64,6 +65,8 @@ type StreamEvent = {
 }
 
 export type ChatHandlers = {
+  onPrompt?: (text: string) => void
+  onScreen?: (text: string) => void
   onDelta: (text: string) => void
   onToolStart: (tool: string, displayText: string, callId?: string) => void
   onToolEnd: (tool: string, callId?: string) => void
@@ -124,6 +127,12 @@ export async function sendPrompt(
     const parsed = parseSseBlock(block)
     if (parsed === null) {
       return
+    }
+    if (parsed.event === "prompt" && parsed.data.text) {
+      handlers.onPrompt?.(parsed.data.text)
+    }
+    if (parsed.event === "screen" && parsed.data.text) {
+      handlers.onScreen?.(parsed.data.text)
     }
     if (parsed.event === "delta" && parsed.data.text) {
       handlers.onDelta(parsed.data.text)

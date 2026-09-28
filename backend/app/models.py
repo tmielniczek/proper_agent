@@ -31,4 +31,5 @@ class Message(SQLModel, table=True):
     content: str | None = None
     tool_calls: str | None = None
     tool_call_id: str | None = None
+    screen_notes: str | None = None
     created_at: datetime = Field(sa_type=DateTime(timezone=True))

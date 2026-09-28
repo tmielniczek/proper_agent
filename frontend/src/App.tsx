@@ -172,13 +172,17 @@ function PersistedTurn({ message }: { message: ChatMessage }) {
     return null
   }
   const pills = (message.tool_calls ?? []).flatMap((call) => pillsForCall(call))
+  const notes = message.screen_notes ?? []
   const text = message.content ?? ""
-  if (text === "" && pills.length === 0) {
+  if (text === "" && pills.length === 0 && notes.length === 0) {
     return null
   }
   return (
     <div className="flex flex-col gap-2">
       {text !== "" ? <MessageBubble role={message.role} content={text} /> : null}
+      {notes.map((note, index) => (
+        <StatusPill key={`${message.id}-screen-${index}`} text={note} status="complete" tone="tool" />
+      ))}
       {pills.map((pill) => (
         <StatusPill key={pill.id} text={pill.text} status={pill.status} tone="tool" />
       ))}
@@ -271,6 +275,39 @@ export default function App() {
         conversationId,
         prompt,
         {
+          onPrompt: (text) => {
+            if (controller.signal.aborted) {
+              return
+            }
+            setMessages((current) => {
+              if (current.length === 0) {
+                return current
+              }
+              const last = current[current.length - 1]
+              if (last?.role !== "user") {
+                return current
+              }
+              return [...current.slice(0, -1), { ...last, content: text }]
+            })
+          },
+          onScreen: (text) => {
+            if (controller.signal.aborted) {
+              return
+            }
+            setMessages((current) => {
+              if (current.length === 0) {
+                return current
+              }
+              const last = current[current.length - 1]
+              if (last?.role !== "user") {
+                return current
+              }
+              return [
+                ...current.slice(0, -1),
+                { ...last, screen_notes: [...(last.screen_notes ?? []), text] },
+              ]
+            })
+          },
           onDelta: (text) => {
             if (controller.signal.aborted) {
               return

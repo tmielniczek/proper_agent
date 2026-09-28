@@ -120,13 +120,14 @@ def test_tasks_past_the_fifth_are_refused_and_the_first_five_start(client, langu
     ) as response:
         events = sse_events(response.read().decode())
 
-    assert events[0] == (
+    assert events[0] == ("prompt", {"text": "Check seven cities"})
+    assert events[1] == (
         "tool_start",
         {"tool": SPAWN_WORKERS, "display_text": "Asking 5 workers..."},
     )
-    assert events[1] == ("refused_task", {"display_text": "Not started · city 6"})
-    assert events[2] == ("refused_task", {"display_text": "Not started · city 7"})
-    assert events[3][0] == "tool_end"
+    assert events[2] == ("refused_task", {"display_text": "Not started · city 6"})
+    assert events[3] == ("refused_task", {"display_text": "Not started · city 7"})
+    assert events[4][0] == "tool_end"
     worker_calls = [
         call[-1]["content"]
         for call in language_model.calls
@@ -161,7 +162,8 @@ def test_a_blank_slot_is_an_error_and_the_other_tasks_still_start(client, langua
     ) as response:
         events = sse_events(response.read().decode())
 
-    assert events[0] == (
+    assert events[0] == ("prompt", {"text": "Two cities and a gap"})
+    assert events[1] == (
         "tool_start",
         {"tool": SPAWN_WORKERS, "display_text": "Asking 2 workers..."},
     )
@@ -377,8 +379,9 @@ def test_a_long_task_is_trimmed_on_the_worker_tool_pill(client, language_model):
     ) as response:
         events = sse_events(response.read().decode())
 
-    assert events[0][1]["display_text"] == "Asking 1 worker..."
-    display = events[1][1]["display_text"]
+    assert events[0] == ("prompt", {"text": "Long task"})
+    assert events[1][1]["display_text"] == "Asking 1 worker..."
+    display = events[2][1]["display_text"]
     assert display == worker_tool_label("get_weather", task)
     assert display.endswith("…")
     assert "Checking weather... · " in display

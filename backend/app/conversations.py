@@ -18,6 +18,7 @@ from app.db import get_session
 from app.llm import ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
 from app.memory import memory_preface
+from app.screen import mask_prompt
 from app.spawn import run_spawn
 from app.tools import LEAD_TOOL_SCHEMAS, SPAWN_WORKERS, display_text, run_tool
 
@@ -58,6 +59,7 @@ class MessageOut(BaseModel):
     content: str | None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
+    screen_notes: list[str] | None = None
     created_at: str
 
 
@@ -124,6 +126,7 @@ async def chat(
     conversation = await _require_conversation(session, conversation_id)
     previous_title = conversation.title
     previous_updated_at = conversation.updated_at
+    masked = mask_prompt(body.prompt)
     existing_user_messages = await session.exec(
         select(Message).where(
             Message.conversation_id == conversation_id,
@@ -131,14 +134,15 @@ async def chat(
         )
     )
     if existing_user_messages.first() is None:
-        conversation.title = body.prompt[:30]
+        conversation.title = masked.text[:30]
 
     now = next_timestamp()
     user_message = Message(
         id=str(uuid4()),
         conversation_id=conversation_id,
         role="user",
-        content=body.prompt,
+        content=masked.text,
+        screen_notes=json.dumps([masked.note]) if masked.note else None,
         created_at=now,
     )
     conversation.updated_at = now
@@ -173,6 +177,9 @@ async def chat(
     )
     _runs[conversation_id] = run
     try:
+        yield ServerSentEvent(event="prompt", data={"text": masked.text})
+        if masked.note is not None:
+            yield ServerSentEvent(event="screen", data={"text": masked.note})
         while True:
             event = await queue.get()
             if event is None:
@@ -379,6 +386,7 @@ def _message_out(message: Message) -> MessageOut:
         content=message.content,
         tool_calls=json.loads(message.tool_calls) if message.tool_calls else None,
         tool_call_id=message.tool_call_id,
+        screen_notes=json.loads(message.screen_notes) if message.screen_notes else None,
         created_at=message.created_at.isoformat(),
     )
 

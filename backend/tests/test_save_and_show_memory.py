@@ -74,11 +74,12 @@ def test_save_trims_the_fact_shows_the_pill_and_keeps_the_call(client, language_
 
     events = _chat(client, conversation_id, "Remember that I live in Berlin")
 
-    assert events[0] == (
+    assert events[0] == ("prompt", {"text": "Remember that I live in Berlin"})
+    assert events[1] == (
         "tool_start",
         {"tool": "long_term_memory", "display_text": "Saving a memory..."},
     )
-    assert events[1][0] == "tool_end"
+    assert events[2][0] == "tool_end"
     assert waited == [3.5]
     detail = client.get(f"/api/conversations/{conversation_id}").json()
     messages = detail["messages"]
@@ -113,8 +114,9 @@ def test_bad_fact_waits_returns_an_error_and_stores_nothing(client, language_mod
 
     for prompt in ("Remember", "Remember a number", "Remember blanks"):
         events = _chat(client, conversation_id, prompt)
-        assert events[0][1]["display_text"] == "Saving a memory..."
-        assert events[1][0] == "tool_end"
+        assert events[0] == ("prompt", {"text": prompt})
+        assert events[1][1]["display_text"] == "Saving a memory..."
+        assert events[2][0] == "tool_end"
 
     assert len(waited) == 3
     detail = client.get(f"/api/conversations/{conversation_id}").json()
@@ -146,7 +148,8 @@ def test_later_turns_list_memories_newest_first_without_storing_the_list(
     _chat(client, conversation_id, "Remember Berlin again")
 
     events = _chat(client, conversation_id, "Remember tea")
-    assert events[0][1]["display_text"] == "Saving a memory..."
+    assert events[0] == ("prompt", {"text": "Remember tea"})
+    assert events[1][1]["display_text"] == "Saving a memory..."
     opening = language_model.calls[-2]
     after_tool = language_model.calls[-1]
     assert len(_system_messages(opening)) == 1

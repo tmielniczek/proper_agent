@@ -171,7 +171,8 @@ def test_a_finished_save_remains_when_a_later_rejection_drops_the_turn(
 
     events = _chat(client, conversation_id, "Remember that I live in Berlin")
 
-    assert events[0][1]["display_text"] == "Saving a memory..."
+    assert events[0] == ("prompt", {"text": "Remember that I live in Berlin"})
+    assert events[1][1]["display_text"] == "Saving a memory..."
     assert events[-1] == ("error", {"error": "The request was rate-limited"})
     detail = client.get(f"/api/conversations/{conversation_id}").json()
     assert detail["messages"] == []
