@@ -245,15 +245,24 @@ async def _reply(
                         tool_calls.append(event)
                         continue
                     parts.append(event)
-                    queue.put_nowait(ServerSentEvent(event="delta", data={"text": event}))
 
                 if not tool_calls:
+                    masked = mask_prompt("".join(parts))
+                    if masked.text:
+                        queue.put_nowait(
+                            ServerSentEvent(event="delta", data={"text": masked.text})
+                        )
+                    if masked.note is not None:
+                        queue.put_nowait(
+                            ServerSentEvent(event="screen", data={"text": masked.note})
+                        )
                     saved_at = next_timestamp()
                     assistant_message = Message(
                         id=str(uuid4()),
                         conversation_id=conversation_id,
                         role="assistant",
-                        content="".join(parts),
+                        content=masked.text,
+                        screen_notes=json.dumps([masked.note]) if masked.note else None,
                         created_at=saved_at,
                     )
                     conversation.updated_at = saved_at
@@ -266,6 +275,8 @@ async def _reply(
                     )
                     return
 
+                for part in parts:
+                    queue.put_nowait(ServerSentEvent(event="delta", data={"text": part}))
                 saved_at = next_timestamp()
                 assistant_message = Message(
                     id=str(uuid4()),

@@ -209,6 +209,7 @@ export default function App() {
   const threadRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const conversationIdRef = useRef<string | null>(null)
+  const liveHasAssistantTextRef = useRef(false)
 
   useEffect(() => {
     listConversations()
@@ -256,6 +257,7 @@ export default function App() {
     setSending(true)
     setError(null)
     setDraft("")
+    liveHasAssistantTextRef.current = false
     setLiveSegments([thinkingPill()])
     setMessages((current) => [
       ...current,
@@ -294,6 +296,19 @@ export default function App() {
             if (controller.signal.aborted) {
               return
             }
+            if (liveHasAssistantTextRef.current) {
+              setLiveSegments((current) => [
+                ...settleThinking(current),
+                {
+                  kind: "pill",
+                  id: crypto.randomUUID(),
+                  tone: "tool",
+                  text,
+                  status: "complete",
+                },
+              ])
+              return
+            }
             setMessages((current) => {
               if (current.length === 0) {
                 return current
@@ -312,6 +327,7 @@ export default function App() {
             if (controller.signal.aborted) {
               return
             }
+            liveHasAssistantTextRef.current = true
             setLiveSegments((current) => {
               const last = current[current.length - 1]
               if (last?.kind === "text") {
