@@ -22,6 +22,7 @@ from app.screen import PHRASE_LIST_REFUSAL, TurnSpend, mask_prompt, matches_phra
 from app.spawn import run_spawn
 from app.tools import LEAD_TOOL_SCHEMAS, SPAWN_WORKERS, display_text, run_tool
 
+
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
 _last_timestamp = datetime.min.replace(tzinfo=timezone.utc)
@@ -265,6 +266,13 @@ async def _reply(
         spend = TurnSpend()
         try:
             while True:
+                reason = await spend.claim_call()
+                if reason is not None:
+                    await _stop_turn(
+                        session, conversation, conversation_id, reason, queue, run
+                    )
+                    return
+
                 parts: list[str] = []
                 tool_calls: list[ToolCall] = []
                 async for event in model.stream(turns, LEAD_TOOL_SCHEMAS):
@@ -357,6 +365,17 @@ async def _reply(
                     session.add(conversation)
                     await session.commit()
                     turns.append(_turn(tool_message))
+
+                if spend.stop_reason is not None:
+                    await _stop_turn(
+                        session,
+                        conversation,
+                        conversation_id,
+                        spend.stop_reason,
+                        queue,
+                        run,
+                    )
+                    return
         except asyncio.CancelledError:
             _clear_cancellation()
             raise
@@ -372,6 +391,33 @@ async def _reply(
             queue.put_nowait(ServerSentEvent(event="error", data={"error": str(rejection)}))
         finally:
             queue.put_nowait(None)
+
+
+async def _stop_turn(
+    session: AsyncSession,
+    conversation: Conversation,
+    conversation_id: str,
+    reason: str,
+    queue: asyncio.Queue[ServerSentEvent | None],
+    run: _Run,
+) -> None:
+    queue.put_nowait(ServerSentEvent(event="delta", data={"text": reason}))
+    saved_at = next_timestamp()
+    assistant_message = Message(
+        id=str(uuid4()),
+        conversation_id=conversation_id,
+        role="assistant",
+        content=reason,
+        created_at=saved_at,
+    )
+    conversation.updated_at = saved_at
+    session.add(assistant_message)
+    session.add(conversation)
+    await session.commit()
+    run.completed = True
+    queue.put_nowait(
+        ServerSentEvent(event="done", data={"message_id": assistant_message.id})
+    )
 
 
 def _as_utc(value: datetime) -> datetime:

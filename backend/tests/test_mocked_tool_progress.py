@@ -323,9 +323,10 @@ class _ScriptedCompletions:
                     _tool_chunk(0, call_id="call_weather", name="get_weather", arguments=""),
                     _tool_chunk(0, arguments='{"location":'),
                     _tool_chunk(0, arguments=' "Berlin"}'),
+                    _usage_chunk(1),
                 ]
             )
-        return _ChunkStream([_text_chunk("It is sunny.")])
+        return _ChunkStream([_text_chunk("It is sunny."), _usage_chunk(1)])
 
 
 class _ChunkStream:
@@ -340,8 +341,18 @@ class _ChunkStream:
             yield chunk
 
 
+def _usage_chunk(total_tokens: int):
+    return SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(total_tokens=total_tokens),
+    )
+
+
 def _text_chunk(text: str):
-    return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=text))],
+        usage=None,
+    )
 
 
 def _tool_chunk(index: int, call_id: str | None = None, name: str | None = None, arguments: str | None = None):
@@ -359,7 +370,8 @@ def _tool_chunk(index: int, call_id: str | None = None, name: str | None = None,
                     ],
                 )
             )
-        ]
+        ],
+        usage=None,
     )
 
 

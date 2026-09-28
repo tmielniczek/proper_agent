@@ -103,6 +103,9 @@ async def _run_worker(
     ]
     try:
         while True:
+            reason = await spend.claim_call()
+            if reason is not None:
+                return {"task": task, "error": reason}
             parts: list[str] = []
             tool_calls: list[ToolCall] = []
             async for event in model.stream(turns, TOOL_SCHEMAS):

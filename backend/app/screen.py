@@ -1,24 +1,54 @@
+import asyncio
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 _SSN = re.compile(r"\d{3}-\d{2}-\d{4}")
 _CARD = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
 _SECRET = re.compile(r"(password|api_key):", re.IGNORECASE)
 
 DAILY_TOKEN_BUDGET = 50_000
+TURN_CALL_CAP = 10
+TURN_TOKEN_CAP = 8_000
 _today_tokens = 0
+
+STOPPED_CALL_CAP = "Stopped: this turn reached 10 model calls."
+STOPPED_TOKEN_CAP = "Stopped: this turn reached 8,000 tokens."
+STOPPED_MISSING_COUNT = "Stopped: this turn's token use could not be counted."
 
 
 @dataclass
 class TurnSpend:
     model_calls: int = 0
     tokens: int = 0
+    missing_count: bool = False
+    stop_reason: str | None = None
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    def capped_reason(self) -> str | None:
+        if self.model_calls >= TURN_CALL_CAP:
+            return STOPPED_CALL_CAP
+        if self.tokens >= TURN_TOKEN_CAP:
+            return STOPPED_TOKEN_CAP
+        # Daily budget refusal belongs here (ticket 06); not enforced yet.
+        if self.missing_count:
+            return STOPPED_MISSING_COUNT
+        return None
+
+    async def claim_call(self) -> str | None:
+        async with self._lock:
+            reason = self.capped_reason()
+            if reason is not None:
+                self.stop_reason = reason
+                return reason
+            self.model_calls += 1
+            return None
 
     def record(self, total_tokens: int | None) -> None:
-        self.model_calls += 1
-        if total_tokens is not None:
-            self.tokens += total_tokens
-            add_today_tokens(total_tokens)
+        if total_tokens is None:
+            self.missing_count = True
+            return
+        self.tokens += total_tokens
+        add_today_tokens(total_tokens)
 
     def note(self) -> str:
         return cost_note(self.model_calls, self.tokens, today_tokens())
