@@ -32,6 +32,7 @@ from app.screen import (
     DAILY_TOKEN_BUDGET,
     PHRASE_LIST_REFUSAL,
     STOPPED_DAILY_BUDGET,
+    STOPPED_MISSING_COUNT,
     TurnSpend,
     mask_prompt,
     matches_phrase_list,
@@ -295,7 +296,7 @@ async def _reply(
         try:
             while True:
                 outgoing = await _lead_messages(
-                    turns, model, context_window, conversation_id
+                    turns, model, context_window, conversation_id, spend
                 )
                 if isinstance(outgoing, str):
                     await _stop_turn(
@@ -581,32 +582,50 @@ def _turn(message: Message) -> dict:
 
 
 async def _lead_messages(
-    turns: list[dict], model: Any, context_window: int, conversation_id: str
+    turns: list[dict],
+    model: Any,
+    context_window: int,
+    conversation_id: str,
+    spend: TurnSpend,
 ) -> list[dict] | str:
     view = lead_view(turns, context_window, rolling_for(conversation_id))
     if view.stop is not None:
         return view.stop
     if view.summary_messages is None:
         return view.messages
+    reason = await spend.claim_call()
+    if reason is not None:
+        return reason
     try:
-        brief = (await _summary_brief(model, view)).strip()
+        brief, usage = await _summary_brief(model, view)
     except ProviderRejection:
         return STOPPED_TOO_LARGE
-    if not brief:
+    await spend.record(usage, spend_turn=False)
+    if spend.missing_count:
+        return STOPPED_MISSING_COUNT
+    if not brief.strip():
         return STOPPED_TOO_LARGE
-    remember_rolling(conversation_id, brief, view.folded_ids)
+    remember_rolling(conversation_id, brief.strip(), view.folded_ids)
     messages = with_brief(view, brief)
     if count_messages(messages) > context_window:
         return STOPPED_TOO_LARGE
     return messages
 
 
-async def _summary_brief(model: Any, view: LeadView) -> str:
+async def _summary_brief(model: Any, view: LeadView) -> tuple[str, int | None]:
     parts: list[str] = []
+    usage: int | None = None
+    saw_usage = False
     async for event in model.stream(view.summary_messages, []):
+        if isinstance(event, ModelUsage):
+            usage = event.total_tokens
+            saw_usage = True
+            continue
         if isinstance(event, str):
             parts.append(event)
-    return "".join(parts)
+    if not saw_usage:
+        usage = None
+    return "".join(parts), usage
 
 
 async def _require_conversation(session: AsyncSession, conversation_id: str) -> Conversation:

@@ -89,11 +89,12 @@ class TurnSpend:
             self.model_calls += 1
             return None
 
-    async def record(self, total_tokens: int | None) -> None:
+    async def record(self, total_tokens: int | None, *, spend_turn: bool = True) -> None:
         if total_tokens is None:
             self.missing_count = True
             return
-        self.tokens += total_tokens
+        if spend_turn:
+            self.tokens += total_tokens
         await add_today_tokens(total_tokens)
 
     async def note(self) -> str:

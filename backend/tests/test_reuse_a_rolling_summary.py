@@ -220,7 +220,7 @@ def test_cancel_discards_the_rolling_summary_when_it_deletes_a_folded_message(
     def reply_for(messages):
         if _is_summary(messages):
             return ["  Running brief.  "]
-        if state["tools"] < 8:
+        if state["tools"] < 4:
             state["tools"] += 1
             return [ToolCall(id=f"call_{state['tools']}", name="get_weather", arguments={"location": "Berlin"})]
         language_model.hold_after_chunks = 0
