@@ -150,3 +150,33 @@ def test_rate_limit_drops_partial_text_and_leaves_the_sidebar(tmp_path, monkeypa
     assert prompt not in json.dumps(detail)
     assert sidebar_after == sidebar_before
     assert [conversation["id"] for conversation in sidebar_after] == [other_id, conversation_id]
+
+
+def test_rejection_drops_masked_prompt_and_leaves_no_reply(tmp_path, monkeypatch):
+    prompt = "My number is 123-45-6789 please keep it"
+    masked = "My number is [ssn] please keep it"
+    note = "Screen: masked 1 social security number"
+    steps = [
+        _TextStream(["Hello"]),
+        _status_error(AuthenticationError, 401),
+    ]
+    with _open_client(tmp_path, monkeypatch, steps) as client:
+        conversation_id = client.post("/api/conversations").json()["id"]
+        _chat(client, conversation_id, FIRST_PROMPT)
+
+        events = _chat(client, conversation_id, prompt)
+
+        detail = client.get(f"/api/conversations/{conversation_id}").json()
+
+    assert ("prompt", {"text": masked}) in events
+    assert ("screen", {"text": note}) in events
+    assert events[-1] == ("error", {"error": "The API key was rejected"})
+    assert [name for name, _payload in events if name == "done"] == []
+    assert [(message["role"], message["content"]) for message in detail["messages"]] == [
+        ("user", FIRST_PROMPT),
+        ("assistant", "Hello"),
+    ]
+    assert prompt not in json.dumps(detail)
+    assert masked not in json.dumps(detail)
+    assert note not in json.dumps(detail)
+    assert detail["title"] == FIRST_PROMPT
