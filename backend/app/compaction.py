@@ -39,7 +39,11 @@ def lead_view(turns: list[dict], window: int) -> LeadView:
     head: list[dict] = [first]
     if preface is not None:
         head.insert(0, preface)
-    tail = tuple(message for message in stored[-TAIL_COUNT:] if message.get("_id") not in head_ids)
+    tail = tuple(
+        message
+        for message in _tail_including_bursts(stored)
+        if message.get("_id") not in head_ids
+    )
     tail_ids = {message["_id"] for message in tail}
     middle = [
         message
@@ -66,6 +70,37 @@ def _preface_and_stored(turns: list[dict]) -> tuple[dict | None, list[dict]]:
     if turns and turns[0].get("role") == "system" and "_id" not in turns[0]:
         return turns[0], turns[1:]
     return None, list(turns)
+
+
+def _tail_including_bursts(stored: list[dict]) -> list[dict]:
+    if not stored:
+        return []
+    start = max(len(stored) - TAIL_COUNT, 0)
+    while start > 0 and _tail_splits_a_burst(stored, start):
+        start -= 1
+    return stored[start:]
+
+
+def _tail_splits_a_burst(stored: list[dict], start: int) -> bool:
+    for message in stored[start:]:
+        if message.get("role") != "tool":
+            continue
+        owner = _owner_index(stored, message.get("tool_call_id"))
+        if owner is not None and owner < start:
+            return True
+    return False
+
+
+def _owner_index(stored: list[dict], tool_call_id: object) -> int | None:
+    if not isinstance(tool_call_id, str):
+        return None
+    for index, message in enumerate(stored):
+        if message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            if call.get("id") == tool_call_id:
+                return index
+    return None
 
 
 def _first_user(stored: list[dict]) -> dict | None:
