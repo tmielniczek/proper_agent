@@ -14,6 +14,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app import db
+from app.compaction import LeadView, lead_view, with_brief
 from app.db import get_session
 from app.llm import ModelUsage, ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
@@ -218,6 +219,7 @@ async def chat(
             previous_title,
             previous_updated_at,
             released,
+            request.app.state.context_window,
         )
     )
     _runs[conversation_id] = run
@@ -270,6 +272,7 @@ async def _reply(
     previous_title: str,
     previous_updated_at: datetime,
     released: asyncio.Event,
+    context_window: int,
 ) -> None:
     await released.wait()
     assert db.session_factory is not None
@@ -282,6 +285,7 @@ async def _reply(
         spend = TurnSpend()
         try:
             while True:
+                outgoing = await _lead_messages(turns, model, context_window)
                 reason = await spend.claim_call()
                 if reason is not None:
                     await _stop_turn(
@@ -291,7 +295,7 @@ async def _reply(
 
                 parts: list[str] = []
                 tool_calls: list[ToolCall] = []
-                async for event in model.stream(turns, LEAD_TOOL_SCHEMAS):
+                async for event in model.stream(outgoing, LEAD_TOOL_SCHEMAS):
                     if isinstance(event, ModelUsage):
                         await spend.record(event.total_tokens)
                         continue
@@ -540,18 +544,36 @@ async def _run_tool_call(
 
 def _turn(message: Message) -> dict:
     if message.role == "tool":
-        return {
+        turn = {
             "role": "tool",
             "tool_call_id": message.tool_call_id,
             "content": message.content or "",
         }
-    if message.tool_calls:
-        return {
+    elif message.tool_calls:
+        turn = {
             "role": "assistant",
             "content": message.content,
             "tool_calls": json.loads(message.tool_calls),
         }
-    return {"role": message.role, "content": message.content or ""}
+    else:
+        turn = {"role": message.role, "content": message.content or ""}
+    turn["_id"] = message.id
+    return turn
+
+
+async def _lead_messages(turns: list[dict], model: Any, context_window: int) -> list[dict]:
+    view = lead_view(turns, context_window)
+    if view.summary_messages is None:
+        return view.messages
+    return with_brief(view, await _summary_brief(model, view))
+
+
+async def _summary_brief(model: Any, view: LeadView) -> str:
+    parts: list[str] = []
+    async for event in model.stream(view.summary_messages, []):
+        if isinstance(event, str):
+            parts.append(event)
+    return "".join(parts)
 
 
 async def _require_conversation(session: AsyncSession, conversation_id: str) -> Conversation:
