@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.compaction import CONTEXT_WINDOW
+from app.compaction import CONTEXT_WINDOW, clear_rolling_summaries
 from app.conversations import router
 from app.db import dispose_engine, init_db, init_engine
 from app.llm import LanguageModel, load_local_env
@@ -24,6 +24,7 @@ def create_app(
     app = FastAPI(title="Agent chat", lifespan=lifespan)
     app.state.language_model = language_model
     app.state.context_window = context_window
+    clear_rolling_summaries()
     app.include_router(router)
     return app
 

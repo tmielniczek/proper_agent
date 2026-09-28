@@ -9,6 +9,16 @@ SUMMARY_INSTRUCTION = (
     "Drop wording the lead no longer needs."
 )
 SUMMARY_PREFIX = "Summary of omitted messages:\n"
+FOLD_INSTRUCTION = (
+    SUMMARY_INSTRUCTION
+    + " Fold the new messages into the previous brief and return one brief."
+)
+
+
+@dataclass(frozen=True)
+class RollingSummary:
+    brief: str
+    folded_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -17,6 +27,32 @@ class LeadView:
     summary_messages: list[dict] | None
     head: tuple[dict, ...]
     tail: tuple[dict, ...]
+    folded_ids: tuple[str, ...] = ()
+
+
+_rolling: dict[str, RollingSummary] = {}
+
+
+def rolling_for(conversation_id: str) -> RollingSummary | None:
+    return _rolling.get(conversation_id)
+
+
+def remember_rolling(conversation_id: str, brief: str, folded_ids: tuple[str, ...]) -> None:
+    _rolling[conversation_id] = RollingSummary(brief, folded_ids)
+
+
+def clear_rolling_summaries() -> None:
+    _rolling.clear()
+
+
+def drop_rolling_if_folded_message_was_deleted(
+    conversation_id: str, deleted_ids: set[str]
+) -> None:
+    current = _rolling.get(conversation_id)
+    if current is None:
+        return
+    if any(folded_id in deleted_ids for folded_id in current.folded_ids):
+        del _rolling[conversation_id]
 
 
 def compaction_line(window: int) -> int:
@@ -27,7 +63,9 @@ def for_model(message: dict) -> dict:
     return {key: value for key, value in message.items() if key != "_id"}
 
 
-def lead_view(turns: list[dict], window: int) -> LeadView:
+def lead_view(
+    turns: list[dict], window: int, previous: RollingSummary | None = None
+) -> LeadView:
     public = [for_model(message) for message in turns]
     if count_messages(public) <= compaction_line(window):
         return LeadView(public, None, (), ())
@@ -52,11 +90,32 @@ def lead_view(turns: list[dict], window: int) -> LeadView:
     ]
     if not middle:
         return LeadView(public, None, (), ())
+    head_tuple = tuple(head)
+    folded = set(previous.folded_ids) if previous is not None else set()
+    if previous is not None and all(message["_id"] in folded for message in middle):
+        reused = with_brief(LeadView([], None, head_tuple, tail), previous.brief)
+        return LeadView(reused, None, head_tuple, tail)
+    fresh = [message for message in middle if message["_id"] not in folded]
+    covered = fresh if previous is not None else middle
+    summary_text = _middle_text(covered)
+    if previous is not None:
+        summary_text = previous.brief if not summary_text else f"{previous.brief}\n{summary_text}"
     summary_messages = [
-        {"role": "system", "content": SUMMARY_INSTRUCTION},
-        {"role": "user", "content": _middle_text(middle)},
+        {"role": "system", "content": SUMMARY_INSTRUCTION if previous is None else FOLD_INSTRUCTION},
+        {"role": "user", "content": summary_text},
     ]
-    return LeadView([], summary_messages, tuple(head), tail)
+    return LeadView([], summary_messages, head_tuple, tail, _folded_ids(previous, middle))
+
+
+def _folded_ids(previous: RollingSummary | None, middle: list[dict]) -> tuple[str, ...]:
+    kept = list(previous.folded_ids) if previous is not None else []
+    seen = set(kept)
+    for message in middle:
+        message_id = message["_id"]
+        if message_id not in seen:
+            kept.append(message_id)
+            seen.add(message_id)
+    return tuple(kept)
 
 
 def with_brief(view: LeadView, brief: str) -> list[dict]:

@@ -14,7 +14,14 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app import db
-from app.compaction import LeadView, lead_view, with_brief
+from app.compaction import (
+    LeadView,
+    drop_rolling_if_folded_message_was_deleted,
+    lead_view,
+    remember_rolling,
+    rolling_for,
+    with_brief,
+)
 from app.db import get_session
 from app.llm import ModelUsage, ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
@@ -285,7 +292,9 @@ async def _reply(
         spend = TurnSpend()
         try:
             while True:
-                outgoing = await _lead_messages(turns, model, context_window)
+                outgoing = await _lead_messages(
+                    turns, model, context_window, conversation_id
+                )
                 reason = await spend.claim_call()
                 if reason is not None:
                     await _stop_turn(
@@ -488,12 +497,15 @@ async def _drop_messages_after(
         select(Message).where(Message.conversation_id == conversation.id)
     )
     cutoff = _as_utc(user_message.created_at)
+    deleted_ids: list[str] = []
     for message in result.all():
         if _as_utc(message.created_at) > cutoff:
+            deleted_ids.append(message.id)
             await session.delete(message)
     conversation.updated_at = user_message.created_at
     session.add(conversation)
     await session.commit()
+    drop_rolling_if_folded_message_was_deleted(conversation.id, set(deleted_ids))
 
 
 def _message_out(message: Message) -> MessageOut:
@@ -561,11 +573,15 @@ def _turn(message: Message) -> dict:
     return turn
 
 
-async def _lead_messages(turns: list[dict], model: Any, context_window: int) -> list[dict]:
-    view = lead_view(turns, context_window)
+async def _lead_messages(
+    turns: list[dict], model: Any, context_window: int, conversation_id: str
+) -> list[dict]:
+    view = lead_view(turns, context_window, rolling_for(conversation_id))
     if view.summary_messages is None:
         return view.messages
-    return with_brief(view, await _summary_brief(model, view))
+    brief = (await _summary_brief(model, view)).strip()
+    remember_rolling(conversation_id, brief, view.folded_ids)
+    return with_brief(view, brief)
 
 
 async def _summary_brief(model: Any, view: LeadView) -> str:
