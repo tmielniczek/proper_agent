@@ -18,7 +18,7 @@ from app.db import get_session
 from app.llm import ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
 from app.memory import memory_preface
-from app.screen import mask_prompt
+from app.screen import PHRASE_LIST_REFUSAL, mask_prompt, matches_phrase_list
 from app.spawn import run_spawn
 from app.tools import LEAD_TOOL_SCHEMAS, SPAWN_WORKERS, display_text, run_tool
 
@@ -127,6 +127,7 @@ async def chat(
     previous_title = conversation.title
     previous_updated_at = conversation.updated_at
     masked = mask_prompt(body.prompt)
+    refused = matches_phrase_list(body.prompt)
     existing_user_messages = await session.exec(
         select(Message).where(
             Message.conversation_id == conversation_id,
@@ -142,12 +143,37 @@ async def chat(
         conversation_id=conversation_id,
         role="user",
         content=masked.text,
-        screen_notes=json.dumps([masked.note]) if masked.note else None,
+        screen_notes=(
+            None
+            if refused
+            else (json.dumps([masked.note]) if masked.note else None)
+        ),
         created_at=now,
     )
     conversation.updated_at = now
     session.add(user_message)
     session.add(conversation)
+
+    if refused:
+        refused_at = next_timestamp()
+        assistant_message = Message(
+            id=str(uuid4()),
+            conversation_id=conversation_id,
+            role="assistant",
+            content=PHRASE_LIST_REFUSAL,
+            created_at=refused_at,
+        )
+        conversation.updated_at = refused_at
+        session.add(assistant_message)
+        session.add(conversation)
+        await session.commit()
+        yield ServerSentEvent(event="prompt", data={"text": masked.text})
+        yield ServerSentEvent(event="delta", data={"text": PHRASE_LIST_REFUSAL})
+        yield ServerSentEvent(
+            event="done", data={"message_id": assistant_message.id}
+        )
+        return
+
     await session.commit()
 
     history = await session.exec(
