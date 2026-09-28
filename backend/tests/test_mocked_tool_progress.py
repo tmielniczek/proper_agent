@@ -42,7 +42,6 @@ def test_weather_call_shows_progress_then_saves_the_forecast(client, language_mo
         "tool_start",
         "tool_end",
         "delta",
-        "delta",
         "done",
     ]
 

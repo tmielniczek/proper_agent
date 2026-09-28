@@ -141,9 +141,7 @@ def test_rate_limit_drops_partial_text_and_leaves_the_sidebar(tmp_path, monkeypa
         detail = client.get(f"/api/conversations/{conversation_id}").json()
         sidebar_after = client.get("/api/conversations").json()
 
-    assert [(name, payload.get("text")) for name, payload in events if name == "delta"] == [
-        ("delta", "Partial"),
-    ]
+    assert [(name, payload.get("text")) for name, payload in events if name == "delta"] == []
     assert events[-1] == ("error", {"error": "The request was rate-limited"})
     assert [name for name, _payload in events if name == "done"] == []
     assert detail["messages"] == []

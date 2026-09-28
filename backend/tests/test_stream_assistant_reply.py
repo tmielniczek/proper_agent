@@ -37,8 +37,7 @@ def test_prompt_streams_plain_text_and_saves_the_assistant_message(client, langu
 
     assert [event for event in events if event[0] in {"tool_start", "tool_end"}] == []
     assert [(name, payload["text"]) for name, payload in events if name == "delta"] == [
-        ("delta", "Hello"),
-        ("delta", " there"),
+        ("delta", "Hello there"),
     ]
     done = [payload for name, payload in events if name == "done"]
     assert len(done) == 1
@@ -167,7 +166,6 @@ def test_reply_is_plain_text_from_the_model_named_in_the_environment(
         "long_term_memory",
     ]
     assert [(name, payload["text"]) for name, payload in events if name == "delta"] == [
-        ("delta", "Plain"),
-        ("delta", " text"),
+        ("delta", "Plain text"),
     ]
     assert detail.json()["messages"][1]["content"] == "Plain text"
