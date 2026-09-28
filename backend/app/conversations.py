@@ -265,20 +265,22 @@ async def _reply(
                 await session.commit()
                 turns.append(_turn(assistant_message))
 
-                for call in tool_calls:
-                    if call.name == SPAWN_WORKERS:
-                        result = await run_spawn(call.arguments.get("tasks"), model, queue)
-                    else:
-                        queue.put_nowait(
-                            ServerSentEvent(
-                                event="tool_start",
-                                data={"tool": call.name, "display_text": display_text(call.name)},
-                            )
+                together = len(tool_calls) > 1 and all(
+                    call.name != SPAWN_WORKERS for call in tool_calls
+                )
+                if together:
+                    results = await asyncio.gather(
+                        *(
+                            _run_tool_call(call, model, queue, parallel=True)
+                            for call in tool_calls
                         )
-                        result = await run_tool(call.name, call.arguments)
-                        queue.put_nowait(
-                            ServerSentEvent(event="tool_end", data={"tool": call.name})
-                        )
+                    )
+                else:
+                    results = [
+                        await _run_tool_call(call, model, queue, parallel=False)
+                        for call in tool_calls
+                    ]
+                for call, result in zip(tool_calls, results, strict=True):
                     tool_saved_at = next_timestamp()
                     tool_message = Message(
                         id=str(uuid4()),
@@ -386,6 +388,28 @@ def _stored_tool_call(call: ToolCall) -> dict[str, Any]:
             "arguments": json.dumps(call.arguments),
         },
     }
+
+
+async def _run_tool_call(
+    call: ToolCall,
+    model: Any,
+    queue: asyncio.Queue,
+    *,
+    parallel: bool,
+) -> dict:
+    if call.name == SPAWN_WORKERS:
+        return await run_spawn(call.arguments.get("tasks"), model, queue)
+    data = {"tool": call.name, "display_text": display_text(call.name)}
+    end = {"tool": call.name}
+    if parallel:
+        call_id = call.id or str(uuid4())
+        data["call_id"] = call_id
+        end["call_id"] = call_id
+    queue.put_nowait(ServerSentEvent(event="tool_start", data=data))
+    try:
+        return await run_tool(call.name, call.arguments)
+    finally:
+        queue.put_nowait(ServerSentEvent(event="tool_end", data=end))
 
 
 def _turn(message: Message) -> dict:

@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.llm import ToolCall
+from test_spawn_workers import _real_sleep
 from test_stream_assistant_reply import sse_events
 
 BERLIN_WEATHER = {
@@ -171,6 +172,48 @@ def test_each_tool_waits_between_one_and_ten_seconds(client, language_model, mon
 
     assert bounds == [(1.0, 10.0), (1.0, 10.0)]
     assert waited == [4.5, 7.0]
+
+
+def test_tool_calls_in_one_reply_run_at_the_same_time(client, language_model, monkeypatch):
+    state = {"current": 0, "max": 0}
+
+    async def overlap(_seconds: float) -> None:
+        state["current"] += 1
+        state["max"] = max(state["max"], state["current"])
+        await _real_sleep(0.05)
+        state["current"] -= 1
+
+    monkeypatch.setattr("app.tools.asyncio.sleep", overlap)
+    language_model.replies = [
+        [
+            ToolCall(id="call_berlin", name="get_weather", arguments={"location": "Berlin"}),
+            ToolCall(id="call_paris", name="get_weather", arguments={"location": "Paris"}),
+        ],
+        ["Both are sunny."],
+    ]
+    conversation_id = client.post("/api/conversations").json()["id"]
+
+    with client.stream(
+        "POST",
+        f"/api/conversations/{conversation_id}/chat",
+        json={"prompt": "Weather in Berlin and Paris"},
+    ) as response:
+        events = sse_events(response.read().decode())
+
+    assert state["max"] == 2
+    starts = [payload for name, payload in events if name == "tool_start"]
+    assert [payload["call_id"] for payload in starts] == ["call_berlin", "call_paris"]
+    assert [name for name, _payload in events[:4]] == [
+        "tool_start",
+        "tool_start",
+        "tool_end",
+        "tool_end",
+    ]
+    detail = client.get(f"/api/conversations/{conversation_id}").json()
+    assert [message["tool_call_id"] for message in detail["messages"] if message["role"] == "tool"] == [
+        "call_berlin",
+        "call_paris",
+    ]
 
 
 def test_later_turn_receives_the_stored_tool_result(client, language_model):
