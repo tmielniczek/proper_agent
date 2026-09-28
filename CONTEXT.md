@@ -27,3 +27,15 @@ _Avoid_: Dropped task, skipped task, overflow
 **Memory**:
 A fact the lead saved because the user asked to keep it, kept for the whole app rather than for one conversation.
 _Avoid_: Note, context, long-term memory
+
+**Screen**:
+The check on the user's prompt and the lead's final text, and the cost check before a model call.
+_Avoid_: Middleware, interceptor, guardrail
+
+**Screen note**:
+A status line in the thread that records a mask or the cost of a finished turn, without the secret.
+_Avoid_: Log, middleware log
+
+**Mask**:
+A social security number, card number, or labeled secret replaced in a prompt or in the lead's final text before that text is stored or shown.
+_Avoid_: Redaction, sanitization
