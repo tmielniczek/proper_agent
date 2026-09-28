@@ -1,6 +1,10 @@
 import asyncio
 import re
 from dataclasses import dataclass, field
+from datetime import date
+
+from app import db
+from app.models import DailyTokenTotal
 
 _SSN = re.compile(r"\d{3}-\d{2}-\d{4}")
 _CARD = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
@@ -9,11 +13,52 @@ _SECRET = re.compile(r"(password|api_key):", re.IGNORECASE)
 DAILY_TOKEN_BUDGET = 50_000
 TURN_CALL_CAP = 10
 TURN_TOKEN_CAP = 8_000
-_today_tokens = 0
 
 STOPPED_CALL_CAP = "Stopped: this turn reached 10 model calls."
 STOPPED_TOKEN_CAP = "Stopped: this turn reached 8,000 tokens."
+STOPPED_DAILY_BUDGET = "Stopped: today's token budget is used up."
 STOPPED_MISSING_COUNT = "Stopped: this turn's token use could not be counted."
+
+_today_lock: asyncio.Lock | None = None
+_today_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def local_day() -> str:
+    return date.today().isoformat()
+
+
+def _daily_lock() -> asyncio.Lock:
+    global _today_lock, _today_lock_loop
+    loop = asyncio.get_running_loop()
+    if _today_lock is None or _today_lock_loop is not loop:
+        _today_lock = asyncio.Lock()
+        _today_lock_loop = loop
+    return _today_lock
+
+
+async def today_tokens() -> int:
+    assert db.session_factory is not None
+    day = local_day()
+    async with db.session_factory() as session:
+        row = await session.get(DailyTokenTotal, day)
+        return 0 if row is None else row.tokens
+
+
+async def add_today_tokens(amount: int) -> int:
+    assert db.session_factory is not None
+    day = local_day()
+    async with _daily_lock():
+        async with db.session_factory() as session:
+            row = await session.get(DailyTokenTotal, day)
+            if row is None:
+                row = DailyTokenTotal(local_date=day, tokens=amount)
+                session.add(row)
+            else:
+                row.tokens += amount
+                session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return row.tokens
 
 
 @dataclass
@@ -24,49 +69,35 @@ class TurnSpend:
     stop_reason: str | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
-    def capped_reason(self) -> str | None:
+    async def capped_reason(self) -> str | None:
         if self.model_calls >= TURN_CALL_CAP:
             return STOPPED_CALL_CAP
         if self.tokens >= TURN_TOKEN_CAP:
             return STOPPED_TOKEN_CAP
-        # Daily budget refusal belongs here (ticket 06); not enforced yet.
+        if await today_tokens() >= DAILY_TOKEN_BUDGET:
+            return STOPPED_DAILY_BUDGET
         if self.missing_count:
             return STOPPED_MISSING_COUNT
         return None
 
     async def claim_call(self) -> str | None:
         async with self._lock:
-            reason = self.capped_reason()
+            reason = await self.capped_reason()
             if reason is not None:
                 self.stop_reason = reason
                 return reason
             self.model_calls += 1
             return None
 
-    def record(self, total_tokens: int | None) -> None:
+    async def record(self, total_tokens: int | None) -> None:
         if total_tokens is None:
             self.missing_count = True
             return
         self.tokens += total_tokens
-        add_today_tokens(total_tokens)
+        await add_today_tokens(total_tokens)
 
-    def note(self) -> str:
-        return cost_note(self.model_calls, self.tokens, today_tokens())
-
-
-def today_tokens() -> int:
-    return _today_tokens
-
-
-def add_today_tokens(amount: int) -> int:
-    global _today_tokens
-    _today_tokens += amount
-    return _today_tokens
-
-
-def reset_today_tokens() -> None:
-    global _today_tokens
-    _today_tokens = 0
+    async def note(self) -> str:
+        return cost_note(self.model_calls, self.tokens, await today_tokens())
 
 
 def cost_note(model_calls: int, turn_tokens: int, today: int) -> str:

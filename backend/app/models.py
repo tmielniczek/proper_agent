@@ -21,6 +21,13 @@ class Memory(SQLModel, table=True):
     created_at: datetime = Field(sa_type=DateTime(timezone=True))
 
 
+class DailyTokenTotal(SQLModel, table=True):
+    __tablename__ = "daily_token_totals"
+
+    local_date: str = Field(primary_key=True)
+    tokens: int = 0
+
+
 class Message(SQLModel, table=True):
     __tablename__ = "messages"
     __table_args__ = (CheckConstraint("role IN ('user', 'assistant', 'tool')"),)

@@ -110,7 +110,7 @@ async def _run_worker(
             tool_calls: list[ToolCall] = []
             async for event in model.stream(turns, TOOL_SCHEMAS):
                 if isinstance(event, ModelUsage):
-                    spend.record(event.total_tokens)
+                    await spend.record(event.total_tokens)
                     continue
                 if isinstance(event, ToolCall):
                     tool_calls.append(event)

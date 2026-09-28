@@ -18,7 +18,15 @@ from app.db import get_session
 from app.llm import ModelUsage, ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
 from app.memory import memory_preface
-from app.screen import PHRASE_LIST_REFUSAL, TurnSpend, mask_prompt, matches_phrase_list
+from app.screen import (
+    DAILY_TOKEN_BUDGET,
+    PHRASE_LIST_REFUSAL,
+    STOPPED_DAILY_BUDGET,
+    TurnSpend,
+    mask_prompt,
+    matches_phrase_list,
+    today_tokens,
+)
 from app.spawn import run_spawn
 from app.tools import LEAD_TOOL_SCHEMAS, SPAWN_WORKERS, display_text, run_tool
 
@@ -128,7 +136,15 @@ async def chat(
     previous_title = conversation.title
     previous_updated_at = conversation.updated_at
     masked = mask_prompt(body.prompt)
-    refused = matches_phrase_list(body.prompt)
+    phrase_refused = matches_phrase_list(body.prompt)
+    budget_refused = (not phrase_refused) and (
+        await today_tokens() >= DAILY_TOKEN_BUDGET
+    )
+    refusal = (
+        PHRASE_LIST_REFUSAL
+        if phrase_refused
+        else (STOPPED_DAILY_BUDGET if budget_refused else None)
+    )
     existing_user_messages = await session.exec(
         select(Message).where(
             Message.conversation_id == conversation_id,
@@ -146,7 +162,7 @@ async def chat(
         content=masked.text,
         screen_notes=(
             None
-            if refused
+            if refusal is not None
             else (json.dumps([masked.note]) if masked.note else None)
         ),
         created_at=now,
@@ -155,13 +171,13 @@ async def chat(
     session.add(user_message)
     session.add(conversation)
 
-    if refused:
+    if refusal is not None:
         refused_at = next_timestamp()
         assistant_message = Message(
             id=str(uuid4()),
             conversation_id=conversation_id,
             role="assistant",
-            content=PHRASE_LIST_REFUSAL,
+            content=refusal,
             created_at=refused_at,
         )
         conversation.updated_at = refused_at
@@ -169,7 +185,7 @@ async def chat(
         session.add(conversation)
         await session.commit()
         yield ServerSentEvent(event="prompt", data={"text": masked.text})
-        yield ServerSentEvent(event="delta", data={"text": PHRASE_LIST_REFUSAL})
+        yield ServerSentEvent(event="delta", data={"text": refusal})
         yield ServerSentEvent(
             event="done", data={"message_id": assistant_message.id}
         )
@@ -277,7 +293,7 @@ async def _reply(
                 tool_calls: list[ToolCall] = []
                 async for event in model.stream(turns, LEAD_TOOL_SCHEMAS):
                     if isinstance(event, ModelUsage):
-                        spend.record(event.total_tokens)
+                        await spend.record(event.total_tokens)
                         continue
                     if isinstance(event, ToolCall):
                         tool_calls.append(event)
@@ -296,7 +312,7 @@ async def _reply(
                         queue.put_nowait(
                             ServerSentEvent(event="screen", data={"text": masked.note})
                         )
-                    cost = spend.note()
+                    cost = await spend.note()
                     notes.append(cost)
                     queue.put_nowait(ServerSentEvent(event="screen", data={"text": cost}))
                     saved_at = next_timestamp()
