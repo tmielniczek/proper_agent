@@ -23,3 +23,7 @@ _Avoid_: Fan-out, delegation, sub-agent run
 **Refused task**:
 A task named in a spawn that does not start a worker, because that spawn already has five.
 _Avoid_: Dropped task, skipped task, overflow
+
+**Memory**:
+A fact the lead saved because the user asked to keep it, kept for the whole app rather than for one conversation.
+_Avoid_: Note, context, long-term memory
