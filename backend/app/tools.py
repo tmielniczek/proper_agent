@@ -3,6 +3,9 @@ import asyncio
 import operator
 import random
 
+SPAWN_WORKERS = "spawn_workers"
+SNIPPET_LIMIT = 80
+
 DISPLAY_TEXT = {
     "get_weather": "Checking weather...",
     "search_database": "Searching database...",
@@ -60,9 +63,59 @@ TOOL_SCHEMAS = [
     },
 ]
 
+SPAWN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": SPAWN_WORKERS,
+        "description": (
+            "Start workers on independent tasks when the user's request splits into "
+            "separate pieces. For a single lookup, call get_weather, search_database, "
+            "or calculator yourself. Each task must stand alone without the conversation. "
+            "At most five tasks start; later tasks are refused. A blank task returns an "
+            "error for that slot and does not start a worker."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered, self-contained tasks.",
+                }
+            },
+            "required": ["tasks"],
+        },
+    },
+}
+
+LEAD_TOOL_SCHEMAS = [*TOOL_SCHEMAS, SPAWN_SCHEMA]
+
 
 def display_text(name: str) -> str:
     return DISPLAY_TEXT[name]
+
+
+def task_snippet(task: str, limit: int = SNIPPET_LIMIT) -> str:
+    line = " ".join(task.split())
+    if len(line) <= limit:
+        return line
+    return line[: limit - 1].rstrip() + "…"
+
+
+def asking_label(started: int) -> str:
+    noun = "worker" if started == 1 else "workers"
+    return f"Asking {started} {noun}..."
+
+
+def refused_label(task: str) -> str:
+    snippet = task_snippet(task)
+    if snippet == "":
+        return "Not started"
+    return f"Not started · {snippet}"
+
+
+def worker_tool_label(name: str, task: str) -> str:
+    return f"{display_text(name)} · {task_snippet(task)}"
 
 
 async def run_tool(name: str, arguments: dict) -> dict:

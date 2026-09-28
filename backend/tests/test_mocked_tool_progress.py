@@ -243,7 +243,8 @@ def test_provider_stream_offers_tools_and_runs_a_streamed_tool_call(tmp_path, mo
         detail = client.get(f"/api/conversations/{conversation_id}").json()
 
     offered = [tool["function"]["name"] for tool in completions.calls[0]["tools"]]
-    assert offered == ["get_weather", "search_database", "calculator"]
+    assert offered == ["get_weather", "search_database", "calculator", "spawn_workers"]
+    assert completions.calls[0]["tools"][3]["function"]["parameters"]["required"] == ["tasks"]
     assert completions.calls[0]["tools"][0]["function"]["parameters"]["required"] == ["location"]
     assert completions.calls[0]["tools"][1]["function"]["parameters"]["required"] == ["query"]
     assert completions.calls[0]["tools"][2]["function"]["parameters"]["required"] == ["expression"]

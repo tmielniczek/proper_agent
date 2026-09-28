@@ -17,7 +17,8 @@ from app import db
 from app.db import get_session
 from app.llm import ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
-from app.tools import display_text, run_tool
+from app.spawn import run_spawn
+from app.tools import LEAD_TOOL_SCHEMAS, SPAWN_WORKERS, display_text, run_tool
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -223,7 +224,7 @@ async def _reply(
             while True:
                 parts: list[str] = []
                 tool_calls: list[ToolCall] = []
-                async for event in model.stream(turns):
+                async for event in model.stream(turns, LEAD_TOOL_SCHEMAS):
                     if isinstance(event, ToolCall):
                         tool_calls.append(event)
                         continue
@@ -265,14 +266,19 @@ async def _reply(
                 turns.append(_turn(assistant_message))
 
                 for call in tool_calls:
-                    queue.put_nowait(
-                        ServerSentEvent(
-                            event="tool_start",
-                            data={"tool": call.name, "display_text": display_text(call.name)},
+                    if call.name == SPAWN_WORKERS:
+                        result = await run_spawn(call.arguments.get("tasks"), model, queue)
+                    else:
+                        queue.put_nowait(
+                            ServerSentEvent(
+                                event="tool_start",
+                                data={"tool": call.name, "display_text": display_text(call.name)},
+                            )
                         )
-                    )
-                    result = await run_tool(call.name, call.arguments)
-                    queue.put_nowait(ServerSentEvent(event="tool_end", data={"tool": call.name}))
+                        result = await run_tool(call.name, call.arguments)
+                        queue.put_nowait(
+                            ServerSentEvent(event="tool_end", data={"tool": call.name})
+                        )
                     tool_saved_at = next_timestamp()
                     tool_message = Message(
                         id=str(uuid4()),

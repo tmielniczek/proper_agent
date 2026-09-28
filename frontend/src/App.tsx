@@ -7,6 +7,7 @@ import {
   sendPrompt,
   type ChatMessage,
   type Conversation,
+  type ToolCallRecord,
 } from "./api.ts"
 
 const TOOL_LABELS: Record<string, string> = {
@@ -16,6 +17,7 @@ const TOOL_LABELS: Record<string, string> = {
 }
 
 type PillTone = "tool" | "thinking"
+type PillStatus = "running" | "complete" | "refused"
 
 type LiveSegment =
   | { kind: "text"; id: string; text: string }
@@ -24,9 +26,64 @@ type LiveSegment =
       id: string
       tone: PillTone
       tool?: string
+      callId?: string
       text: string
-      status: "running" | "complete"
+      status: PillStatus
     }
+
+const SNIPPET_LIMIT = 80
+
+function taskSnippet(task: string): string {
+  const line = task.trim().split(/\s+/).filter(Boolean).join(" ")
+  if (line.length <= SNIPPET_LIMIT) {
+    return line
+  }
+  return `${line.slice(0, SNIPPET_LIMIT - 1).trimEnd()}…`
+}
+
+function askingLabel(started: number): string {
+  return `Asking ${started} ${started === 1 ? "worker" : "workers"}...`
+}
+
+function refusedLabel(task: string): string {
+  const snippet = taskSnippet(task)
+  return snippet === "" ? "Not started" : `Not started · ${snippet}`
+}
+
+function pillsForCall(call: ToolCallRecord): { id: string; text: string; status: PillStatus }[] {
+  if (call.function.name !== "spawn_workers") {
+    return [
+      {
+        id: call.id,
+        text: TOOL_LABELS[call.function.name] ?? call.function.name,
+        status: "complete",
+      },
+    ]
+  }
+  let tasks: unknown[] = []
+  try {
+    const parsed = JSON.parse(call.function.arguments) as { tasks?: unknown }
+    if (Array.isArray(parsed.tasks)) {
+      tasks = parsed.tasks
+    }
+  } catch {
+    return []
+  }
+  if (tasks.length === 0) {
+    return []
+  }
+  const started = tasks
+    .slice(0, 5)
+    .filter((task) => typeof task === "string" && task.trim() !== "").length
+  return [
+    { id: call.id, text: askingLabel(started), status: "complete" },
+    ...tasks.slice(5).map((task, index) => ({
+      id: `${call.id}-refused-${index}`,
+      text: refusedLabel(typeof task === "string" ? task : ""),
+      status: "refused" as const,
+    })),
+  ]
+}
 
 function thinkingPill(): LiveSegment {
   return {
@@ -48,6 +105,10 @@ function settleThinking(segments: LiveSegment[]): LiveSegment[] {
   )
 }
 
+function stillRunning(segments: LiveSegment[]): boolean {
+  return segments.some((segment) => segment.kind === "pill" && segment.status === "running")
+}
+
 function withThinking(segments: LiveSegment[]): LiveSegment[] {
   if (segments.some(isRunningThinking)) {
     return segments
@@ -61,7 +122,7 @@ function StatusPill({
   tone,
 }: {
   text: string
-  status: "running" | "complete"
+  status: PillStatus
   tone: PillTone
 }) {
   const running = status === "running"
@@ -70,20 +131,23 @@ function StatusPill({
       ? "animate-pulse border-sky-700 bg-sky-950/60 text-sky-100"
       : "animate-pulse border-amber-800 bg-amber-950/50 text-amber-100"
   const doneClass =
-    tone === "thinking"
-      ? "border-sky-900 bg-sky-950/40 text-sky-300"
-      : "border-stone-700 bg-stone-900 text-stone-300"
+    status === "refused"
+      ? "border-stone-700 bg-stone-950 text-stone-400"
+      : tone === "thinking"
+        ? "border-sky-900 bg-sky-950/40 text-sky-300"
+        : "border-stone-700 bg-stone-900 text-stone-300"
+  const mark = running ? "●" : status === "refused" ? "–" : "✓"
   return (
     <p
       role="status"
       data-status={status}
       data-tone={tone}
-      aria-label={running ? text : `${text} complete`}
+      aria-label={status === "complete" ? `${text} complete` : text}
       className={`mr-auto inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${
         running ? runningClass : doneClass
       }`}
     >
-      <span aria-hidden="true">{running ? "●" : "✓"}</span>
+      <span aria-hidden="true">{mark}</span>
       {text}
     </p>
   )
@@ -106,10 +170,7 @@ function PersistedTurn({ message }: { message: ChatMessage }) {
   if (message.role === "tool") {
     return null
   }
-  const pills = (message.tool_calls ?? []).map((call) => ({
-    id: call.id,
-    text: TOOL_LABELS[call.function.name] ?? call.function.name,
-  }))
+  const pills = (message.tool_calls ?? []).flatMap((call) => pillsForCall(call))
   const text = message.content ?? ""
   if (text === "" && pills.length === 0) {
     return null
@@ -118,7 +179,7 @@ function PersistedTurn({ message }: { message: ChatMessage }) {
     <div className="flex flex-col gap-2">
       {text !== "" ? <MessageBubble role={message.role} content={text} /> : null}
       {pills.map((pill) => (
-        <StatusPill key={pill.id} text={pill.text} status="complete" tone="tool" />
+        <StatusPill key={pill.id} text={pill.text} status={pill.status} tone="tool" />
       ))}
     </div>
   )
@@ -221,7 +282,7 @@ export default function App() {
               return [...current, { kind: "text", id: crypto.randomUUID(), text }]
             })
           },
-          onToolStart: (tool, displayText) => {
+          onToolStart: (tool, displayText, callId) => {
             if (controller.signal.aborted) {
               return
             }
@@ -232,30 +293,48 @@ export default function App() {
                 id: crypto.randomUUID(),
                 tone: "tool",
                 tool,
+                callId,
                 text: displayText,
                 status: "running",
               },
             ])
           },
-          onToolEnd: (tool) => {
+          onToolEnd: (tool, callId) => {
             if (controller.signal.aborted) {
               return
             }
             setLiveSegments((current) => {
               const index = current.findIndex(
                 (segment) =>
-                  segment.kind === "pill" && segment.tool === tool && segment.status === "running",
+                  segment.kind === "pill" &&
+                  segment.status === "running" &&
+                  (callId ? segment.callId === callId : segment.tool === tool),
               )
               if (index === -1) {
-                return withThinking(current)
+                return stillRunning(current) ? current : withThinking(current)
               }
               const next = current.slice()
               const pill = next[index]
               if (pill?.kind === "pill") {
                 next[index] = { ...pill, status: "complete" }
               }
-              return withThinking(next)
+              return stillRunning(next) ? next : withThinking(next)
             })
+          },
+          onRefused: (displayText) => {
+            if (controller.signal.aborted) {
+              return
+            }
+            setLiveSegments((current) => [
+              ...current,
+              {
+                kind: "pill",
+                id: crypto.randomUUID(),
+                tone: "tool",
+                text: displayText,
+                status: "refused",
+              },
+            ])
           },
         },
         controller.signal,

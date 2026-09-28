@@ -23,7 +23,9 @@ class ProviderRejection(Exception):
 
 
 class LanguageModel(Protocol):
-    def stream(self, messages: list[dict]) -> AsyncIterator[str | ToolCall]: ...
+    def stream(
+        self, messages: list[dict], tools: list[dict] | None = None
+    ) -> AsyncIterator[str | ToolCall]: ...
 
 
 def load_local_env() -> None:
@@ -52,9 +54,11 @@ class OpenAILanguageModel:
         self._model = model
         self._client = AsyncOpenAI(api_key=api_key)
 
-    async def stream(self, messages: list[dict]) -> AsyncIterator[str | ToolCall]:
+    async def stream(
+        self, messages: list[dict], tools: list[dict] | None = None
+    ) -> AsyncIterator[str | ToolCall]:
         try:
-            async for event in self._events(messages):
+            async for event in self._events(messages, tools):
                 yield event
         except APIStatusError as exc:
             rejection = _provider_rejection(exc)
@@ -62,11 +66,13 @@ class OpenAILanguageModel:
                 raise
             raise rejection from exc
 
-    async def _events(self, messages: list[dict]) -> AsyncIterator[str | ToolCall]:
+    async def _events(
+        self, messages: list[dict], tools: list[dict] | None
+    ) -> AsyncIterator[str | ToolCall]:
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
-            tools=TOOL_SCHEMAS,
+            tools=TOOL_SCHEMAS if tools is None else tools,
             stream=True,
         )
         try:

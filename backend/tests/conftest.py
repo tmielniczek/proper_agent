@@ -11,19 +11,27 @@ class RecordingModel:
     def __init__(self) -> None:
         self.replies: list[list[object]] = [["stub reply"]]
         self.calls: list[list[dict]] = []
+        self.offered_tools: list[list[dict] | None] = []
+        self.reply_for = None
         self.hold_after_chunks: int | None = None
         self.holding = threading.Event()
         self.release = threading.Event()
         self.yielded: list[object] = []
 
-    async def stream(self, messages: list[dict]):
+    async def stream(self, messages: list[dict], tools: list[dict] | None = None):
         self.calls.append([dict(message) for message in messages])
-        chunks = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        self.offered_tools.append(tools)
+        if self.reply_for is not None:
+            chunks = self.reply_for(messages)
+        else:
+            chunks = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         for index, chunk in enumerate(chunks):
             if self.hold_after_chunks is not None and index == self.hold_after_chunks:
                 self.holding.set()
                 while not self.release.is_set():
                     await _pause(0.01)
+            if isinstance(chunk, BaseException):
+                raise chunk
             self.yielded.append(chunk)
             yield chunk
 

@@ -54,13 +54,20 @@ export function getConversation(conversationId: string): Promise<ConversationDet
 
 type StreamEvent = {
   event: string
-  data: { text?: string; error?: string; tool?: string; display_text?: string }
+  data: {
+    text?: string
+    error?: string
+    tool?: string
+    display_text?: string
+    call_id?: string
+  }
 }
 
 export type ChatHandlers = {
   onDelta: (text: string) => void
-  onToolStart: (tool: string, displayText: string) => void
-  onToolEnd: (tool: string) => void
+  onToolStart: (tool: string, displayText: string, callId?: string) => void
+  onToolEnd: (tool: string, callId?: string) => void
+  onRefused: (displayText: string) => void
 }
 
 function parseSseBlock(block: string): StreamEvent | null {
@@ -122,10 +129,17 @@ export async function sendPrompt(
       handlers.onDelta(parsed.data.text)
     }
     if (parsed.event === "tool_start" && parsed.data.tool) {
-      handlers.onToolStart(parsed.data.tool, parsed.data.display_text ?? parsed.data.tool)
+      handlers.onToolStart(
+        parsed.data.tool,
+        parsed.data.display_text ?? parsed.data.tool,
+        parsed.data.call_id,
+      )
     }
     if (parsed.event === "tool_end" && parsed.data.tool) {
-      handlers.onToolEnd(parsed.data.tool)
+      handlers.onToolEnd(parsed.data.tool, parsed.data.call_id)
+    }
+    if (parsed.event === "refused_task" && parsed.data.display_text) {
+      handlers.onRefused(parsed.data.display_text)
     }
     if (parsed.event === "error") {
       throw new Error(parsed.data.error ?? "Could not get a reply")
