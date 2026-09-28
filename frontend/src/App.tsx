@@ -14,6 +14,7 @@ const TOOL_LABELS: Record<string, string> = {
   get_weather: "Checking weather...",
   search_database: "Searching database...",
   calculator: "Calculating...",
+  long_term_memory: "Saving a memory...",
 }
 
 type PillTone = "tool" | "thinking"

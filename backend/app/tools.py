@@ -3,13 +3,22 @@ import asyncio
 import operator
 import random
 
+from app.memory import save_memory
+
 SPAWN_WORKERS = "spawn_workers"
 SNIPPET_LIMIT = 80
+
+LONG_TERM_MEMORY = "long_term_memory"
 
 DISPLAY_TEXT = {
     "get_weather": "Checking weather...",
     "search_database": "Searching database...",
     "calculator": "Calculating...",
+}
+
+_LABELS = {
+    **DISPLAY_TEXT,
+    LONG_TERM_MEMORY: "Saving a memory...",
 }
 
 _BINOPS = {
@@ -88,11 +97,27 @@ SPAWN_SCHEMA = {
     },
 }
 
-LEAD_TOOL_SCHEMAS = [*TOOL_SCHEMAS, SPAWN_SCHEMA]
+MEMORY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": LONG_TERM_MEMORY,
+        "description": (
+            "Call this when the user asks to remember or store something. "
+            "Pass one short fact."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"fact": {"type": "string"}},
+            "required": ["fact"],
+        },
+    },
+}
+
+LEAD_TOOL_SCHEMAS = [*TOOL_SCHEMAS, SPAWN_SCHEMA, MEMORY_SCHEMA]
 
 
 def display_text(name: str) -> str:
-    return DISPLAY_TEXT[name]
+    return _LABELS[name]
 
 
 def task_snippet(task: str, limit: int = SNIPPET_LIMIT) -> str:
@@ -120,6 +145,8 @@ def worker_tool_label(name: str, task: str) -> str:
 
 async def run_tool(name: str, arguments: dict) -> dict:
     await asyncio.sleep(random.uniform(1.0, 10.0))
+    if name == LONG_TERM_MEMORY:
+        return await save_memory(arguments)
     if name == "get_weather":
         return {
             "temperature": 21,

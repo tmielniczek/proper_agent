@@ -13,6 +13,14 @@ class Conversation(SQLModel, table=True):
     updated_at: datetime = Field(sa_type=DateTime(timezone=True))
 
 
+class Memory(SQLModel, table=True):
+    __tablename__ = "memories"
+
+    id: str = Field(primary_key=True)
+    fact: str
+    created_at: datetime = Field(sa_type=DateTime(timezone=True))
+
+
 class Message(SQLModel, table=True):
     __tablename__ = "messages"
     __table_args__ = (CheckConstraint("role IN ('user', 'assistant', 'tool')"),)

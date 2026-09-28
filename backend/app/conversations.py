@@ -17,6 +17,7 @@ from app import db
 from app.db import get_session
 from app.llm import ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
+from app.memory import memory_preface
 from app.spawn import run_spawn
 from app.tools import LEAD_TOOL_SCHEMAS, SPAWN_WORKERS, display_text, run_tool
 
@@ -220,6 +221,9 @@ async def _reply(
     async with db.session_factory() as session:
         conversation = await session.get(Conversation, conversation_id)
         assert conversation is not None
+        preface = await memory_preface()
+        if preface is not None:
+            turns.insert(0, {"role": "system", "content": preface})
         try:
             while True:
                 parts: list[str] = []

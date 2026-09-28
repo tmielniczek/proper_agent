@@ -57,7 +57,11 @@ def test_spawn_runs_independent_workers_and_stores_only_their_final_text(
         events = sse_events(response.read().decode())
 
     assert state["max"] == 2
-    assert _names(language_model.offered_tools[0]) == [*TOOL_NAMES, SPAWN_WORKERS]
+    assert _names(language_model.offered_tools[0]) == [
+        *TOOL_NAMES,
+        SPAWN_WORKERS,
+        "long_term_memory",
+    ]
     assert _names(language_model.offered_tools[1]) == TOOL_NAMES
     assert language_model.calls[1] == [
         WORKER_PREFACE,

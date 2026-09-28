@@ -164,6 +164,7 @@ def test_reply_is_plain_text_from_the_model_named_in_the_environment(
         "search_database",
         "calculator",
         "spawn_workers",
+        "long_term_memory",
     ]
     assert [(name, payload["text"]) for name, payload in events if name == "delta"] == [
         ("delta", "Plain"),
