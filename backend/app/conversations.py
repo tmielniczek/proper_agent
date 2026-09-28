@@ -21,6 +21,7 @@ from app.compaction import (
     lead_view,
     remember_rolling,
     rolling_for,
+    summary_anchor,
     with_brief,
 )
 from app.tokens import count_messages
@@ -83,8 +84,14 @@ class MessageOut(BaseModel):
     created_at: str
 
 
+class CompactionOut(BaseModel):
+    brief: str
+    after_message_id: str | None = None
+
+
 class ConversationDetail(ConversationOut):
     messages: list[MessageOut]
+    compaction: CompactionOut | None = None
 
 
 class ChatIn(BaseModel):
@@ -131,9 +138,17 @@ async def get_conversation(
         .where(Message.conversation_id == conversation_id)
         .order_by(Message.created_at.asc())
     )
-    messages = [_message_out(message) for message in result.all()]
+    stored = list(result.all())
+    messages = [_message_out(message) for message in stored]
     summary = _conversation_out(conversation)
-    return ConversationDetail(**summary.model_dump(), messages=messages)
+    rolling = rolling_for(conversation_id)
+    compaction = None
+    if rolling is not None:
+        compaction = CompactionOut(
+            brief=rolling.brief,
+            after_message_id=summary_anchor([_turn(message) for message in stored], rolling.folded_ids),
+        )
+    return ConversationDetail(**summary.model_dump(), messages=messages, compaction=compaction)
 
 
 @router.post("/{conversation_id}/chat", response_class=EventSourceResponse)
@@ -296,7 +311,7 @@ async def _reply(
         try:
             while True:
                 outgoing = await _lead_messages(
-                    turns, model, context_window, conversation_id, spend
+                    turns, model, context_window, conversation_id, spend, queue
                 )
                 if isinstance(outgoing, str):
                     await _stop_turn(
@@ -581,17 +596,31 @@ def _turn(message: Message) -> dict:
     return turn
 
 
+def _announce_compaction(
+    queue: asyncio.Queue[ServerSentEvent | None],
+    brief: str,
+    after_message_id: str | None,
+) -> None:
+    data: dict[str, str] = {"text": brief}
+    if after_message_id is not None:
+        data["after_message_id"] = after_message_id
+    queue.put_nowait(ServerSentEvent(event="compaction", data=data))
+
+
 async def _lead_messages(
     turns: list[dict],
     model: Any,
     context_window: int,
     conversation_id: str,
     spend: TurnSpend,
+    queue: asyncio.Queue[ServerSentEvent | None],
 ) -> list[dict] | str:
     view = lead_view(turns, context_window, rolling_for(conversation_id))
     if view.stop is not None:
         return view.stop
     if view.summary_messages is None:
+        if view.brief is not None:
+            _announce_compaction(queue, view.brief, view.after_message_id)
         return view.messages
     reason = await spend.claim_call()
     if reason is not None:
@@ -605,7 +634,9 @@ async def _lead_messages(
         return STOPPED_MISSING_COUNT
     if not brief.strip():
         return STOPPED_TOO_LARGE
-    remember_rolling(conversation_id, brief.strip(), view.folded_ids)
+    brief = brief.strip()
+    remember_rolling(conversation_id, brief, view.folded_ids)
+    _announce_compaction(queue, brief, view.after_message_id)
     messages = with_brief(view, brief)
     if count_messages(messages) > context_window:
         return STOPPED_TOO_LARGE

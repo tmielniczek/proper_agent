@@ -170,6 +170,14 @@ def test_over_the_line_sends_the_head_one_summary_and_a_tail_of_six(client, lang
     assert "beta" in stored
     assert all(not (content or "").startswith(SUMMARY_MARK) for content in stored)
     assert stored[-1] == "Lead answer"
+    beta = next(message for message in detail["messages"] if message["content"] == "beta")
+    assert detail["compaction"] == {
+        "brief": "Kept the request.",
+        "after_message_id": beta["id"],
+    }
+    assert [payload for name, payload in events if name == "compaction"] == [
+        {"text": "Kept the request.", "after_message_id": beta["id"]}
+    ]
 
 
 def test_an_oversized_list_with_nothing_to_fold_stops_before_a_model_call(client, language_model):

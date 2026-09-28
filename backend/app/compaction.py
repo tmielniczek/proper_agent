@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from app.tokens import count_messages
 
-CONTEXT_WINDOW = 50_000
+CONTEXT_WINDOW = 5_000
 TAIL_COUNT = 6
 SUMMARY_INSTRUCTION = (
     "Write one short brief of decisions, tool results, and user asks that are still open. "
@@ -30,6 +30,8 @@ class LeadView:
     tail: tuple[dict, ...]
     folded_ids: tuple[str, ...] = ()
     stop: str | None = None
+    brief: str | None = None
+    after_message_id: str | None = None
 
 
 _rolling: dict[str, RollingSummary] = {}
@@ -93,6 +95,7 @@ def lead_view(
     if not middle:
         return LeadView([], None, (), (), stop=STOPPED_TOO_LARGE)
     head_tuple = tuple(head)
+    anchor = middle[-1]["_id"]
     if _over_line(head_tuple, tail, window):
         return LeadView([], None, (), (), stop=STOPPED_TOO_LARGE)
     folded = set(previous.folded_ids) if previous is not None else set()
@@ -100,7 +103,14 @@ def lead_view(
         reused = with_brief(LeadView([], None, head_tuple, tail), previous.brief)
         if count_messages(reused) > window:
             return LeadView([], None, (), (), stop=STOPPED_TOO_LARGE)
-        return LeadView(reused, None, head_tuple, tail)
+        return LeadView(
+            reused,
+            None,
+            head_tuple,
+            tail,
+            brief=previous.brief,
+            after_message_id=anchor,
+        )
     fresh = [message for message in middle if message["_id"] not in folded]
     covered = fresh if previous is not None else middle
     summary_text = _middle_text(covered)
@@ -112,7 +122,34 @@ def lead_view(
     ]
     if count_messages(summary_messages) > window:
         return LeadView([], None, (), (), stop=STOPPED_TOO_LARGE)
-    return LeadView([], summary_messages, head_tuple, tail, _folded_ids(previous, middle))
+    return LeadView(
+        [],
+        summary_messages,
+        head_tuple,
+        tail,
+        _folded_ids(previous, middle),
+        after_message_id=anchor,
+    )
+
+
+def summary_anchor(turns: list[dict], folded_ids: tuple[str, ...]) -> str | None:
+    _, stored = _preface_and_stored(turns)
+    first = _first_user(stored)
+    if first is None:
+        return None
+    head_ids = {first["_id"]}
+    tail_ids = {
+        message["_id"]
+        for message in _tail_including_bursts(stored)
+        if message.get("_id") not in head_ids
+    }
+    folded = set(folded_ids)
+    anchor = None
+    for message in stored:
+        message_id = message.get("_id")
+        if message_id in folded and message_id not in head_ids and message_id not in tail_ids:
+            anchor = message_id
+    return anchor
 
 
 def _over_line(head: tuple[dict, ...], tail: tuple[dict, ...], window: int) -> bool:

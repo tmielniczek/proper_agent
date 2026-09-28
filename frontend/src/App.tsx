@@ -6,6 +6,7 @@ import {
   listConversations,
   sendPrompt,
   type ChatMessage,
+  type Compaction,
   type Conversation,
   type ToolCallRecord,
 } from "./api.ts"
@@ -154,6 +155,28 @@ function StatusPill({
   )
 }
 
+function CompactionPill({ brief }: { brief: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mr-auto flex max-w-[40rem] flex-col gap-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className="inline-flex w-fit items-center gap-2 rounded-full border border-stone-700 bg-stone-900 px-3 py-1 text-xs text-stone-300"
+      >
+        <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+        Compacted
+      </button>
+      {open ? (
+        <div className="rounded-2xl border border-stone-800 bg-stone-900 px-4 py-3 text-sm leading-6 text-stone-300">
+          <p className="whitespace-pre-wrap">{brief}</p>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function MessageBubble({ role, content }: { role: string; content: string }) {
   const isUser = role === "user"
   return (
@@ -206,6 +229,7 @@ export default function App() {
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([])
+  const [compaction, setCompaction] = useState<Compaction | null>(null)
   const threadRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const conversationIdRef = useRef<string | null>(null)
@@ -224,16 +248,18 @@ export default function App() {
     if (thread) {
       thread.scrollTop = thread.scrollHeight
     }
-  }, [messages, liveSegments, error])
+  }, [messages, liveSegments, error, compaction])
 
   async function openConversation(conversationId: string) {
     conversationIdRef.current = conversationId
     setSelectedId(conversationId)
     setError(null)
+    setCompaction(null)
     try {
       const detail = await getConversation(conversationId)
       setLiveSegments([])
       setMessages(detail.messages)
+      setCompaction(detail.compaction)
     } catch (cause: unknown) {
       setError(errorMessage(cause, "Could not open that conversation"))
     }
@@ -244,6 +270,7 @@ export default function App() {
     setSelectedId(null)
     setMessages([])
     setLiveSegments([])
+    setCompaction(null)
     setError(null)
     setDraft("")
   }
@@ -375,6 +402,12 @@ export default function App() {
               return stillRunning(next) ? next : withThinking(next)
             })
           },
+          onCompaction: (brief, afterMessageId) => {
+            if (controller.signal.aborted) {
+              return
+            }
+            setCompaction({ brief, after_message_id: afterMessageId })
+          },
           onRefused: (displayText) => {
             if (controller.signal.aborted) {
               return
@@ -404,6 +437,7 @@ export default function App() {
       setConversations(nextConversations)
       setLiveSegments([])
       setMessages(detail.messages)
+      setCompaction(detail.compaction)
     } catch (cause: unknown) {
       if (controller.signal.aborted) {
         return
@@ -435,6 +469,7 @@ export default function App() {
       setConversations(nextConversations)
       setLiveSegments([])
       setMessages(detail.messages)
+      setCompaction(detail.compaction)
     } catch (cause: unknown) {
       setError(errorMessage(cause, "Could not cancel the reply"))
     } finally {
@@ -506,9 +541,22 @@ export default function App() {
             </p>
           ) : (
             <>
-              {messages.map((message) => (
-                <PersistedTurn key={message.id} message={message} />
-              ))}
+              {messages.map((message) => {
+                const showPill = compaction?.after_message_id === message.id
+                if (message.role === "tool" && !showPill) {
+                  return null
+                }
+                return (
+                  <div key={message.id} className="flex flex-col gap-3">
+                    <PersistedTurn message={message} />
+                    {showPill && compaction ? <CompactionPill brief={compaction.brief} /> : null}
+                  </div>
+                )
+              })}
+              {compaction &&
+              !messages.some((message) => message.id === compaction.after_message_id) ? (
+                <CompactionPill brief={compaction.brief} />
+              ) : null}
               {liveSegments.map((segment) =>
                 segment.kind === "text" ? (
                   <MessageBubble key={segment.id} role="assistant" content={segment.text} />

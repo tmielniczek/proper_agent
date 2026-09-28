@@ -24,8 +24,14 @@ export type ChatMessage = {
   screen_notes?: string[] | null
 }
 
+export type Compaction = {
+  brief: string
+  after_message_id: string | null
+}
+
 type ConversationDetail = Conversation & {
   messages: ChatMessage[]
+  compaction: Compaction | null
 }
 
 async function readJson<T>(response: Response, message: string): Promise<T> {
@@ -61,6 +67,7 @@ type StreamEvent = {
     tool?: string
     display_text?: string
     call_id?: string
+    after_message_id?: string
   }
 }
 
@@ -71,6 +78,7 @@ export type ChatHandlers = {
   onToolStart: (tool: string, displayText: string, callId?: string) => void
   onToolEnd: (tool: string, callId?: string) => void
   onRefused: (displayText: string) => void
+  onCompaction?: (brief: string, afterMessageId: string | null) => void
 }
 
 function parseSseBlock(block: string): StreamEvent | null {
@@ -149,6 +157,9 @@ export async function sendPrompt(
     }
     if (parsed.event === "refused_task" && parsed.data.display_text) {
       handlers.onRefused(parsed.data.display_text)
+    }
+    if (parsed.event === "compaction" && parsed.data.text) {
+      handlers.onCompaction?.(parsed.data.text, parsed.data.after_message_id ?? null)
     }
     if (parsed.event === "error") {
       throw new Error(parsed.data.error ?? "Could not get a reply")

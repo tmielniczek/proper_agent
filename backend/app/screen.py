@@ -12,10 +12,10 @@ _SECRET = re.compile(r"(password|api_key):", re.IGNORECASE)
 
 DAILY_TOKEN_BUDGET = 50_000
 TURN_CALL_CAP = 10
-TURN_TOKEN_CAP = 8_000
+TURN_TOKEN_CAP = 5_000
 
 STOPPED_CALL_CAP = "Stopped: this turn reached 10 model calls."
-STOPPED_TOKEN_CAP = "Stopped: this turn reached 8,000 tokens."
+STOPPED_TOKEN_CAP = "Stopped: this turn reached 5,000 tokens."
 STOPPED_DAILY_BUDGET = "Stopped: today's token budget is used up."
 STOPPED_MISSING_COUNT = "Stopped: this turn's token use could not be counted."
 
