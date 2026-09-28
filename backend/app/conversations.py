@@ -163,6 +163,7 @@ async def chat(
         request.app.state.language_model = model
 
     queue: asyncio.Queue[ServerSentEvent | None] = asyncio.Queue()
+    released = asyncio.Event()
     run = _Run(user_message_id=user_message.id)
     run.task = asyncio.create_task(
         _reply(
@@ -173,6 +174,7 @@ async def chat(
             run,
             previous_title,
             previous_updated_at,
+            released,
         )
     )
     _runs[conversation_id] = run
@@ -180,6 +182,7 @@ async def chat(
         yield ServerSentEvent(event="prompt", data={"text": masked.text})
         if masked.note is not None:
             yield ServerSentEvent(event="screen", data={"text": masked.note})
+        released.set()
         while True:
             event = await queue.get()
             if event is None:
@@ -223,7 +226,9 @@ async def _reply(
     run: _Run,
     previous_title: str,
     previous_updated_at: datetime,
+    released: asyncio.Event,
 ) -> None:
+    await released.wait()
     assert db.session_factory is not None
     async with db.session_factory() as session:
         conversation = await session.get(Conversation, conversation_id)
