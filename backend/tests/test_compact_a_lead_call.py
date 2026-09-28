@@ -10,6 +10,7 @@ from test_spawn_workers import WORKER_PREFACE, _spawn
 
 FILL = ("alpha", "beta", "gamma", "delta")
 SUMMARY_MARK = "Summary of omitted messages:\n"
+COMPACTION_WINDOW = 200
 
 
 def _window_for_line(line: int) -> int:
@@ -30,9 +31,19 @@ def _plain_turns(pairs: list[tuple[str, str]], latest: str) -> list[dict]:
     return turns
 
 
-def _seed(client, language_model, conversation_id: str, prompts: tuple[str, ...] = FILL) -> None:
+def _seed(
+    client,
+    language_model,
+    conversation_id: str,
+    prompts: tuple[str, ...] = FILL,
+    *,
+    long_middle: bool = False,
+) -> None:
     language_model.reply_for = None
-    language_model.replies = [["Noted."]]
+    if long_middle:
+        language_model.replies = [[text_with_tokens(150)], ["Noted."]]
+    else:
+        language_model.replies = [["Noted."]]
     for prompt in prompts:
         _chat(client, conversation_id, prompt)
 
@@ -112,12 +123,10 @@ def test_tool_schemas_do_not_push_a_call_over_the_line(client, language_model):
 
 
 def test_over_the_line_sends_the_head_one_summary_and_a_tail_of_six(client, language_model):
-    language_model.replies = [["Noted."]]
     conversation_id = client.post("/api/conversations").json()["id"]
-    _seed(client, language_model, conversation_id)
+    _seed(client, language_model, conversation_id, long_middle=True)
     latest = "omega"
-    turns = _plain_turns([(prompt, "Noted.") for prompt in FILL], latest)
-    client.app.state.context_window = _window_for_line(count_messages(turns) - 1)
+    client.app.state.context_window = COMPACTION_WINDOW
 
     def reply_for(messages):
         if _is_summary(messages):
@@ -163,7 +172,7 @@ def test_over_the_line_sends_the_head_one_summary_and_a_tail_of_six(client, lang
     assert stored[-1] == "Lead answer"
 
 
-def test_an_oversized_list_with_nothing_to_fold_makes_no_summary_call(client, language_model):
+def test_an_oversized_list_with_nothing_to_fold_stops_before_a_model_call(client, language_model):
     first = text_with_tokens(30)
     language_model.replies = [["Noted."]]
     conversation_id = client.post("/api/conversations").json()["id"]
@@ -174,26 +183,31 @@ def test_an_oversized_list_with_nothing_to_fold_makes_no_summary_call(client, la
     language_model.calls.clear()
     language_model.offered_tools.clear()
 
-    _chat(client, conversation_id, latest)
+    events = _chat(client, conversation_id, latest)
 
-    assert _summary_calls(language_model) == []
-    assert language_model.calls == [turns]
-    assert [message["content"] for message in language_model.calls[0]].count(first) == 1
+    assert language_model.calls == []
+    assert [payload["text"] for name, payload in events if name == "delta"] == [
+        "Stopped: this conversation is larger than the context window."
+    ]
+    assert [name for name, _ in events if name == "screen"] == []
+    detail = client.get(f"/api/conversations/{conversation_id}").json()
+    assert detail["messages"][-2]["content"] == latest
+    assert detail["messages"][-1]["content"] == (
+        "Stopped: this conversation is larger than the context window."
+    )
+    assert detail["messages"][-1].get("screen_notes") is None
+    assert [message["content"] for message in detail["messages"]].count(first) == 1
 
 
 def test_head_keeps_the_stored_first_message_masks_included(client, language_model):
     masked = f"Card {VALID_CARD}".replace(VALID_CARD, "[card number]")
-    language_model.replies = [["Noted."]]
+    language_model.replies = [[text_with_tokens(150)], ["Noted."]]
     conversation_id = client.post("/api/conversations").json()["id"]
     _chat(client, conversation_id, f"Card {VALID_CARD}")
     for prompt in ("beta", "gamma", "delta"):
         _chat(client, conversation_id, prompt)
+    client.app.state.context_window = COMPACTION_WINDOW
     latest = "omega"
-    turns = _plain_turns(
-        [(masked, "Noted."), ("beta", "Noted."), ("gamma", "Noted."), ("delta", "Noted.")],
-        latest,
-    )
-    client.app.state.context_window = _window_for_line(count_messages(turns) - 1)
     language_model.reply_for = lambda messages: (
         ["  Kept the request.  "] if _is_summary(messages) else ["Lead answer"]
     )
@@ -220,13 +234,10 @@ def test_memory_preface_is_in_the_head_and_takes_no_tail_slot(client, language_m
     saver = client.post("/api/conversations").json()["id"]
     _chat(client, saver, "Remember that I like tea")
     conversation_id = client.post("/api/conversations").json()["id"]
-    _seed(client, language_model, conversation_id)
+    _seed(client, language_model, conversation_id, long_middle=True)
     latest = "omega"
     preface = format_memories(["User likes tea."])
-    turns = [{"role": "system", "content": preface}, *_plain_turns(
-        [(prompt, "Noted.") for prompt in FILL], latest
-    )]
-    client.app.state.context_window = _window_for_line(count_messages(turns) - 1)
+    client.app.state.context_window = COMPACTION_WINDOW
     language_model.reply_for = lambda messages: (
         ["  Kept the request.  "] if _is_summary(messages) else ["Lead answer"]
     )
@@ -246,10 +257,9 @@ def test_memory_preface_is_in_the_head_and_takes_no_tail_slot(client, language_m
 def test_no_preface_when_there_are_no_memories(client, language_model):
     language_model.replies = [["Noted."]]
     conversation_id = client.post("/api/conversations").json()["id"]
-    _seed(client, language_model, conversation_id)
+    _seed(client, language_model, conversation_id, long_middle=True)
     latest = "omega"
-    turns = _plain_turns([(prompt, "Noted.") for prompt in FILL], latest)
-    client.app.state.context_window = _window_for_line(count_messages(turns) - 1)
+    client.app.state.context_window = COMPACTION_WINDOW
     language_model.reply_for = lambda messages: (
         ["Brief."] if _is_summary(messages) else ["Lead answer"]
     )
@@ -332,10 +342,9 @@ def test_a_tool_message_counts_as_one_toward_the_tail(client, language_model, mo
 def test_a_worker_still_receives_its_instruction_and_its_task(client, language_model):
     language_model.replies = [["Noted."]]
     conversation_id = client.post("/api/conversations").json()["id"]
-    _seed(client, language_model, conversation_id)
+    _seed(client, language_model, conversation_id, long_middle=True)
     latest = "omega"
-    turns = _plain_turns([(prompt, "Noted.") for prompt in FILL], latest)
-    client.app.state.context_window = _window_for_line(count_messages(turns) - 1)
+    client.app.state.context_window = COMPACTION_WINDOW
     state = {"lead": 0}
 
     def reply_for(messages):

@@ -15,6 +15,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app import db
 from app.compaction import (
+    STOPPED_TOO_LARGE,
     LeadView,
     drop_rolling_if_folded_message_was_deleted,
     lead_view,
@@ -22,6 +23,7 @@ from app.compaction import (
     rolling_for,
     with_brief,
 )
+from app.tokens import count_messages
 from app.db import get_session
 from app.llm import ModelUsage, ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
@@ -295,6 +297,11 @@ async def _reply(
                 outgoing = await _lead_messages(
                     turns, model, context_window, conversation_id
                 )
+                if isinstance(outgoing, str):
+                    await _stop_turn(
+                        session, conversation, conversation_id, outgoing, queue, run
+                    )
+                    return
                 reason = await spend.claim_call()
                 if reason is not None:
                     await _stop_turn(
@@ -575,13 +582,23 @@ def _turn(message: Message) -> dict:
 
 async def _lead_messages(
     turns: list[dict], model: Any, context_window: int, conversation_id: str
-) -> list[dict]:
+) -> list[dict] | str:
     view = lead_view(turns, context_window, rolling_for(conversation_id))
+    if view.stop is not None:
+        return view.stop
     if view.summary_messages is None:
         return view.messages
-    brief = (await _summary_brief(model, view)).strip()
+    try:
+        brief = (await _summary_brief(model, view)).strip()
+    except ProviderRejection:
+        return STOPPED_TOO_LARGE
+    if not brief:
+        return STOPPED_TOO_LARGE
     remember_rolling(conversation_id, brief, view.folded_ids)
-    return with_brief(view, brief)
+    messages = with_brief(view, brief)
+    if count_messages(messages) > context_window:
+        return STOPPED_TOO_LARGE
+    return messages
 
 
 async def _summary_brief(model: Any, view: LeadView) -> str:

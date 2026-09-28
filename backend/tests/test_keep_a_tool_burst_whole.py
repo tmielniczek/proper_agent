@@ -1,8 +1,7 @@
-import json
-
 from app.llm import ToolCall
-from app.tokens import count_messages
+from app.tokens import count_messages, text_with_tokens
 from test_compact_a_lead_call import (
+    COMPACTION_WINDOW,
     SUMMARY_MARK,
     _is_summary,
     _lead_calls,
@@ -97,6 +96,7 @@ def test_spawn_result_in_the_middle_is_folded_into_the_brief(client, language_mo
         [_spawn(["Note the weather"])],
         ["Sunny in Berlin"],
         ["Compared."],
+        [text_with_tokens(600)],
         ["Noted."],
     ]
     conversation_id = client.post("/api/conversations").json()["id"]
@@ -116,7 +116,7 @@ def test_spawn_result_in_the_middle_is_folded_into_the_brief(client, language_mo
     language_model.reply_for = reply_for
     language_model.calls.clear()
     language_model.offered_tools.clear()
-    client.app.state.context_window = 20
+    client.app.state.context_window = 780
 
     _chat(client, conversation_id, "omega")
 
@@ -132,11 +132,11 @@ def test_a_later_lead_call_compacts_the_list_that_includes_new_tool_results(
     client, language_model, monkeypatch
 ):
     _instant(monkeypatch)
-    language_model.replies = [["Noted."]]
+    language_model.replies = [[text_with_tokens(150)], ["Noted."]]
     conversation_id = client.post("/api/conversations").json()["id"]
     for prompt in ("alpha", "beta", "gamma", "delta"):
         _chat(client, conversation_id, prompt)
-    client.app.state.context_window = 20
+    client.app.state.context_window = COMPACTION_WINDOW
     state = {"lead": 0}
 
     def reply_for(messages):

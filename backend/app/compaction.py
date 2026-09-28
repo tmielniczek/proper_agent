@@ -9,6 +9,7 @@ SUMMARY_INSTRUCTION = (
     "Drop wording the lead no longer needs."
 )
 SUMMARY_PREFIX = "Summary of omitted messages:\n"
+STOPPED_TOO_LARGE = "Stopped: this conversation is larger than the context window."
 FOLD_INSTRUCTION = (
     SUMMARY_INSTRUCTION
     + " Fold the new messages into the previous brief and return one brief."
@@ -28,6 +29,7 @@ class LeadView:
     head: tuple[dict, ...]
     tail: tuple[dict, ...]
     folded_ids: tuple[str, ...] = ()
+    stop: str | None = None
 
 
 _rolling: dict[str, RollingSummary] = {}
@@ -89,11 +91,15 @@ def lead_view(
         if message.get("_id") not in head_ids and message.get("_id") not in tail_ids
     ]
     if not middle:
-        return LeadView(public, None, (), ())
+        return LeadView([], None, (), (), stop=STOPPED_TOO_LARGE)
     head_tuple = tuple(head)
+    if _over_line(head_tuple, tail, window):
+        return LeadView([], None, (), (), stop=STOPPED_TOO_LARGE)
     folded = set(previous.folded_ids) if previous is not None else set()
     if previous is not None and all(message["_id"] in folded for message in middle):
         reused = with_brief(LeadView([], None, head_tuple, tail), previous.brief)
+        if count_messages(reused) > window:
+            return LeadView([], None, (), (), stop=STOPPED_TOO_LARGE)
         return LeadView(reused, None, head_tuple, tail)
     fresh = [message for message in middle if message["_id"] not in folded]
     covered = fresh if previous is not None else middle
@@ -104,7 +110,14 @@ def lead_view(
         {"role": "system", "content": SUMMARY_INSTRUCTION if previous is None else FOLD_INSTRUCTION},
         {"role": "user", "content": summary_text},
     ]
+    if count_messages(summary_messages) > window:
+        return LeadView([], None, (), (), stop=STOPPED_TOO_LARGE)
     return LeadView([], summary_messages, head_tuple, tail, _folded_ids(previous, middle))
+
+
+def _over_line(head: tuple[dict, ...], tail: tuple[dict, ...], window: int) -> bool:
+    protected = [for_model(message) for message in head] + [for_model(message) for message in tail]
+    return count_messages(protected) > compaction_line(window)
 
 
 def _folded_ids(previous: RollingSummary | None, middle: list[dict]) -> tuple[str, ...]:
