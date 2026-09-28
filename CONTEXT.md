@@ -39,3 +39,30 @@ _Avoid_: Log, middleware log
 **Mask**:
 A social security number, card number, or labeled secret replaced in a prompt or in the lead's final text before that text is stored or shown.
 _Avoid_: Redaction, sanitization
+
+## Compaction
+
+**Context window**:
+The token capacity of one lead model call.
+_Avoid_: Memory, daily budget, turn cap
+
+**Compaction**:
+The head, one summary, and a tail standing in for the lead's messages on a model call. Stored messages stay the transcript.
+_Avoid_: Truncation, pruning
+
+**Head**:
+The memory preface, when one is sent, together with the conversation's first user message.
+
+**Tail**:
+The latest messages of the conversation kept in full on a compacted model call.
+
+**Tool burst**:
+An assistant message that requests tools, together with the tool messages that answer those requests.
+_Avoid_: Tool pair, tool round
+
+**Summary**:
+The user message that stands in for the messages between the head and the tail.
+
+**Rolling summary**:
+The summary kept for a conversation, covering the middle already folded in.
+_Avoid_: Stored summary, transcript summary
