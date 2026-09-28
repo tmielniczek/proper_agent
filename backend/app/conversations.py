@@ -17,6 +17,7 @@ from app import db
 from app.compaction import (
     STOPPED_TOO_LARGE,
     LeadView,
+    compaction_line,
     drop_rolling_if_folded_message_was_deleted,
     lead_view,
     remember_rolling,
@@ -94,6 +95,12 @@ class ConversationDetail(ConversationOut):
     compaction: CompactionOut | None = None
 
 
+class TokenStatsOut(BaseModel):
+    tokens: int
+    context_window: int
+    compaction_line: int
+
+
 class ChatIn(BaseModel):
     prompt: str = Field(min_length=1)
 
@@ -149,6 +156,31 @@ async def get_conversation(
             after_message_id=summary_anchor([_turn(message) for message in stored], rolling.folded_ids),
         )
     return ConversationDetail(**summary.model_dump(), messages=messages, compaction=compaction)
+
+
+@router.get("/{conversation_id}/tokens")
+async def conversation_tokens(
+    conversation_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> TokenStatsOut:
+    await _require_conversation(session, conversation_id)
+    result = await session.exec(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+    )
+    turns = [_turn(message) for message in result.all()]
+    if turns:
+        preface = await memory_preface()
+        if preface is not None:
+            turns.insert(0, {"role": "system", "content": preface})
+    window = request.app.state.context_window
+    return TokenStatsOut(
+        tokens=count_messages(turns),
+        context_window=window,
+        compaction_line=compaction_line(window),
+    )
 
 
 @router.post("/{conversation_id}/chat", response_class=EventSourceResponse)

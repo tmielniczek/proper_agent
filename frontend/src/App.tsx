@@ -3,11 +3,13 @@ import {
   cancelConversation,
   createConversation,
   getConversation,
+  getTokenStats,
   listConversations,
   sendPrompt,
   type ChatMessage,
   type Compaction,
   type Conversation,
+  type TokenStats,
   type ToolCallRecord,
 } from "./api.ts"
 
@@ -213,6 +215,84 @@ function PersistedTurn({ message }: { message: ChatMessage }) {
   )
 }
 
+function tokenLabel(count: number): string {
+  return `${count.toLocaleString("en-US")} ${count === 1 ? "token" : "tokens"}`
+}
+
+function TokenStatsDialog({
+  open,
+  stats,
+  error,
+  onClose,
+}: {
+  open: boolean
+  stats: TokenStats | null
+  error: string | null
+  onClose: () => void
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) {
+      return
+    }
+    if (open && !dialog.open) {
+      dialog.showModal()
+    }
+    if (!open && dialog.open) {
+      dialog.close()
+    }
+  }, [open])
+
+  return (
+    <dialog
+      ref={dialogRef}
+      aria-labelledby="token-stats-title"
+      onClose={onClose}
+      onClick={(event) => {
+        if (event.target === dialogRef.current) {
+          onClose()
+        }
+      }}
+      className="m-auto w-full max-w-sm rounded-2xl border border-stone-700 bg-stone-950 p-6 text-stone-100 backdrop:bg-black/60"
+    >
+      <h2 id="token-stats-title" className="text-base font-medium">
+        Token use
+      </h2>
+      {error ? (
+        <p role="alert" className="mt-4 text-sm text-red-300">
+          {error}
+        </p>
+      ) : stats === null ? (
+        <p className="mt-4 text-sm text-stone-400">Counting tokens…</p>
+      ) : (
+        <dl className="mt-4 flex flex-col gap-3 text-sm">
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-stone-400">This chat</dt>
+            <dd className="font-medium">{tokenLabel(stats.tokens)}</dd>
+          </div>
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-stone-400">Compaction line</dt>
+            <dd>{tokenLabel(stats.compaction_line)}</dd>
+          </div>
+          <div className="flex items-baseline justify-between gap-4">
+            <dt className="text-stone-400">Context window</dt>
+            <dd>{tokenLabel(stats.context_window)}</dd>
+          </div>
+        </dl>
+      )}
+      <button
+        type="button"
+        onClick={onClose}
+        className="mt-6 rounded-xl border border-stone-600 px-4 py-2 text-sm text-stone-100"
+      >
+        Close
+      </button>
+    </dialog>
+  )
+}
+
 function displayTitle(title: string): string {
   return title.trim() === "" ? "New chat" : title
 }
@@ -230,6 +310,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [liveSegments, setLiveSegments] = useState<LiveSegment[]>([])
   const [compaction, setCompaction] = useState<Compaction | null>(null)
+  const [statsOpen, setStatsOpen] = useState(false)
+  const [tokenStats, setTokenStats] = useState<TokenStats | null>(null)
+  const [statsError, setStatsError] = useState<string | null>(null)
   const threadRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const conversationIdRef = useRef<string | null>(null)
@@ -255,6 +338,7 @@ export default function App() {
     setSelectedId(conversationId)
     setError(null)
     setCompaction(null)
+    setStatsOpen(false)
     try {
       const detail = await getConversation(conversationId)
       setLiveSegments([])
@@ -271,8 +355,23 @@ export default function App() {
     setMessages([])
     setLiveSegments([])
     setCompaction(null)
+    setStatsOpen(false)
     setError(null)
     setDraft("")
+  }
+
+  async function openStats() {
+    if (selectedId === null) {
+      return
+    }
+    setStatsOpen(true)
+    setTokenStats(null)
+    setStatsError(null)
+    try {
+      setTokenStats(await getTokenStats(selectedId))
+    } catch (cause: unknown) {
+      setStatsError(errorMessage(cause, "Could not load token use"))
+    }
   }
 
   async function submitPrompt() {
@@ -589,25 +688,41 @@ export default function App() {
               aria-label="Message"
               className="min-h-16 flex-1 resize-none rounded-xl border border-stone-700 bg-stone-900 px-4 py-3 text-sm outline-none placeholder:text-stone-500 focus:border-stone-500"
             />
-            {sending ? (
+            <div className="flex flex-col gap-2">
               <button
                 type="button"
-                onClick={() => void stopGeneration()}
-                className="rounded-xl border border-stone-600 px-4 py-3 text-sm font-medium text-stone-100"
+                onClick={() => void openStats()}
+                disabled={selectedId === null}
+                className="rounded-xl border border-stone-600 px-4 py-2 text-sm font-medium text-stone-100 disabled:opacity-40"
               >
-                Cancel
+                Stats
               </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={draft.trim() === ""}
-                className="rounded-xl bg-stone-100 px-4 py-3 text-sm font-medium text-stone-950 disabled:opacity-40"
-              >
-                Send
-              </button>
-            )}
+              {sending ? (
+                <button
+                  type="button"
+                  onClick={() => void stopGeneration()}
+                  className="rounded-xl border border-stone-600 px-4 py-3 text-sm font-medium text-stone-100"
+                >
+                  Cancel
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={draft.trim() === ""}
+                  className="rounded-xl bg-stone-100 px-4 py-3 text-sm font-medium text-stone-950 disabled:opacity-40"
+                >
+                  Send
+                </button>
+              )}
+            </div>
           </div>
         </form>
+        <TokenStatsDialog
+          open={statsOpen}
+          stats={tokenStats}
+          error={statsError}
+          onClose={() => setStatsOpen(false)}
+        />
       </main>
     </div>
   )

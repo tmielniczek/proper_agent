@@ -29,6 +29,12 @@ export type Compaction = {
   after_message_id: string | null
 }
 
+export type TokenStats = {
+  tokens: number
+  context_window: number
+  compaction_line: number
+}
+
 type ConversationDetail = Conversation & {
   messages: ChatMessage[]
   compaction: Compaction | null
@@ -56,6 +62,12 @@ export function createConversation(): Promise<Conversation> {
 export function getConversation(conversationId: string): Promise<ConversationDetail> {
   return fetch(`/api/conversations/${conversationId}`).then((response) =>
     readJson<ConversationDetail>(response, "Could not open that conversation"),
+  )
+}
+
+export function getTokenStats(conversationId: string): Promise<TokenStats> {
+  return fetch(`/api/conversations/${conversationId}/tokens`).then((response) =>
+    readJson<TokenStats>(response, "Could not load token use"),
   )
 }
 
