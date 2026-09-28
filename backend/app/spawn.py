@@ -5,7 +5,8 @@ from uuid import uuid4
 
 from fastapi.sse import ServerSentEvent
 
-from app.llm import LanguageModel, ProviderRejection, ToolCall
+from app.llm import LanguageModel, ModelUsage, ProviderRejection, ToolCall
+from app.screen import TurnSpend
 from app.tools import (
     DISPLAY_TEXT,
     SPAWN_WORKERS,
@@ -56,7 +57,9 @@ def _refused_text(item: object) -> str:
     return ""
 
 
-async def run_spawn(raw: object, model: LanguageModel, queue: asyncio.Queue) -> dict:
+async def run_spawn(
+    raw: object, model: LanguageModel, queue: asyncio.Queue, spend: TurnSpend
+) -> dict:
     plan = _plan(raw)
     if isinstance(plan, str):
         return {"error": plan}
@@ -71,23 +74,29 @@ async def run_spawn(raw: object, model: LanguageModel, queue: asyncio.Queue) -> 
         queue.put_nowait(
             ServerSentEvent(event="refused_task", data={"display_text": refused_label(task)})
         )
-    results = await asyncio.gather(*(_slot_result(slot, model, queue) for slot in plan.slots))
+    results = await asyncio.gather(
+        *(_slot_result(slot, model, queue, spend) for slot in plan.slots)
+    )
     queue.put_nowait(ServerSentEvent(event="tool_end", data={"tool": SPAWN_WORKERS}))
     return {"workers": list(results), "refused": plan.refused}
 
 
-async def _slot_result(slot: _Slot, model: LanguageModel, queue: asyncio.Queue) -> dict:
+async def _slot_result(
+    slot: _Slot, model: LanguageModel, queue: asyncio.Queue, spend: TurnSpend
+) -> dict:
     if slot.error is not None:
         return {"task": slot.task, "error": slot.error}
     try:
-        return await _run_worker(slot.task, model, queue)
+        return await _run_worker(slot.task, model, queue, spend)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         return {"task": slot.task, "error": str(exc)}
 
 
-async def _run_worker(task: str, model: LanguageModel, queue: asyncio.Queue) -> dict:
+async def _run_worker(
+    task: str, model: LanguageModel, queue: asyncio.Queue, spend: TurnSpend
+) -> dict:
     turns: list[dict] = [
         {"role": "system", "content": WORKER_INSTRUCTIONS},
         {"role": "user", "content": task},
@@ -97,6 +106,9 @@ async def _run_worker(task: str, model: LanguageModel, queue: asyncio.Queue) -> 
             parts: list[str] = []
             tool_calls: list[ToolCall] = []
             async for event in model.stream(turns, TOOL_SCHEMAS):
+                if isinstance(event, ModelUsage):
+                    spend.record(event.total_tokens)
+                    continue
                 if isinstance(event, ToolCall):
                     tool_calls.append(event)
                     continue

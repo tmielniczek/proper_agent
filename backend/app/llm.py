@@ -18,6 +18,11 @@ class ToolCall:
     arguments: dict
 
 
+@dataclass(frozen=True)
+class ModelUsage:
+    total_tokens: int | None
+
+
 class ProviderRejection(Exception):
     pass
 
@@ -25,7 +30,7 @@ class ProviderRejection(Exception):
 class LanguageModel(Protocol):
     def stream(
         self, messages: list[dict], tools: list[dict] | None = None
-    ) -> AsyncIterator[str | ToolCall]: ...
+    ) -> AsyncIterator[str | ToolCall | ModelUsage]: ...
 
 
 def load_local_env() -> None:
@@ -56,7 +61,7 @@ class OpenAILanguageModel:
 
     async def stream(
         self, messages: list[dict], tools: list[dict] | None = None
-    ) -> AsyncIterator[str | ToolCall]:
+    ) -> AsyncIterator[str | ToolCall | ModelUsage]:
         try:
             async for event in self._events(messages, tools):
                 yield event
@@ -68,16 +73,23 @@ class OpenAILanguageModel:
 
     async def _events(
         self, messages: list[dict], tools: list[dict] | None
-    ) -> AsyncIterator[str | ToolCall]:
+    ) -> AsyncIterator[str | ToolCall | ModelUsage]:
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
             tools=TOOL_SCHEMAS if tools is None else tools,
             stream=True,
+            stream_options={"include_usage": True},
         )
         try:
             pending: dict[int, dict[str, str]] = {}
+            reported_total: int | None = None
+            saw_usage = False
             async for chunk in response:
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    saw_usage = True
+                    reported_total = getattr(usage, "total_tokens", None)
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -105,6 +117,7 @@ class OpenAILanguageModel:
                     name=slot["name"],
                     arguments=_tool_arguments(slot["arguments"]),
                 )
+            yield ModelUsage(total_tokens=reported_total if saw_usage else None)
         finally:
             close = getattr(response, "close", None)
             if close is not None:

@@ -38,10 +38,14 @@ def _add_message_tool_columns(sync_connection) -> None:
 
 
 async def init_db() -> None:
+    from app.screen import reset_today_tokens
+
     assert engine is not None
     async with engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
         await connection.run_sync(_add_message_tool_columns)
+    reset_today_tokens()
+
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

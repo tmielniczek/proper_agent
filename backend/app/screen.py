@@ -5,6 +5,49 @@ _SSN = re.compile(r"\d{3}-\d{2}-\d{4}")
 _CARD = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
 _SECRET = re.compile(r"(password|api_key):", re.IGNORECASE)
 
+DAILY_TOKEN_BUDGET = 50_000
+_today_tokens = 0
+
+
+@dataclass
+class TurnSpend:
+    model_calls: int = 0
+    tokens: int = 0
+
+    def record(self, total_tokens: int | None) -> None:
+        self.model_calls += 1
+        if total_tokens is not None:
+            self.tokens += total_tokens
+            add_today_tokens(total_tokens)
+
+    def note(self) -> str:
+        return cost_note(self.model_calls, self.tokens, today_tokens())
+
+
+def today_tokens() -> int:
+    return _today_tokens
+
+
+def add_today_tokens(amount: int) -> int:
+    global _today_tokens
+    _today_tokens += amount
+    return _today_tokens
+
+
+def reset_today_tokens() -> None:
+    global _today_tokens
+    _today_tokens = 0
+
+
+def cost_note(model_calls: int, turn_tokens: int, today: int) -> str:
+    call_unit = "model call" if model_calls == 1 else "model calls"
+    token_unit = "token" if turn_tokens == 1 else "tokens"
+    return (
+        f"Screen: {model_calls:,} {call_unit}, {turn_tokens:,} {token_unit}. "
+        f"Today {today:,} of {DAILY_TOKEN_BUDGET:,}."
+    )
+
+
 PHRASE_LIST = (
     "ignore previous instructions",
     "ignore all previous instructions",

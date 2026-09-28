@@ -59,7 +59,9 @@ def test_nine_bare_digits_are_left_as_written(client, language_model):
     events = _chat(client, conversation_id, prompt)
 
     assert ("prompt", {"text": prompt}) in events
-    assert [name for name, _ in events if name == "screen"] == []
+    assert [payload["text"] for name, payload in events if name == "screen"] == [
+        "Screen: 1 model call, 1 token. Today 1 of 50,000."
+    ]
     detail = client.get(f"/api/conversations/{conversation_id}").json()
     assert detail["messages"][0]["content"] == prompt
     assert detail["messages"][0].get("screen_notes") is None
@@ -136,7 +138,9 @@ def test_ordinary_prompt_emits_prompt_without_a_screen_note(client, language_mod
     events = _chat(client, conversation_id, prompt)
 
     assert events[0] == ("prompt", {"text": prompt})
-    assert [name for name, _ in events if name == "screen"] == []
+    assert [payload["text"] for name, payload in events if name == "screen"] == [
+        "Screen: 1 model call, 1 token. Today 1 of 50,000."
+    ]
     detail = client.get(f"/api/conversations/{conversation_id}").json()
     assert detail["messages"][0]["content"] == prompt
     assert detail["messages"][0].get("screen_notes") is None

@@ -15,10 +15,10 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app import db
 from app.db import get_session
-from app.llm import ProviderRejection, ToolCall, model_from_env
+from app.llm import ModelUsage, ProviderRejection, ToolCall, model_from_env
 from app.models import Conversation, Message
 from app.memory import memory_preface
-from app.screen import PHRASE_LIST_REFUSAL, mask_prompt, matches_phrase_list
+from app.screen import PHRASE_LIST_REFUSAL, TurnSpend, mask_prompt, matches_phrase_list
 from app.spawn import run_spawn
 from app.tools import LEAD_TOOL_SCHEMAS, SPAWN_WORKERS, display_text, run_tool
 
@@ -262,11 +262,15 @@ async def _reply(
         preface = await memory_preface()
         if preface is not None:
             turns.insert(0, {"role": "system", "content": preface})
+        spend = TurnSpend()
         try:
             while True:
                 parts: list[str] = []
                 tool_calls: list[ToolCall] = []
                 async for event in model.stream(turns, LEAD_TOOL_SCHEMAS):
+                    if isinstance(event, ModelUsage):
+                        spend.record(event.total_tokens)
+                        continue
                     if isinstance(event, ToolCall):
                         tool_calls.append(event)
                         continue
@@ -278,17 +282,22 @@ async def _reply(
                         queue.put_nowait(
                             ServerSentEvent(event="delta", data={"text": masked.text})
                         )
+                    notes: list[str] = []
                     if masked.note is not None:
+                        notes.append(masked.note)
                         queue.put_nowait(
                             ServerSentEvent(event="screen", data={"text": masked.note})
                         )
+                    cost = spend.note()
+                    notes.append(cost)
+                    queue.put_nowait(ServerSentEvent(event="screen", data={"text": cost}))
                     saved_at = next_timestamp()
                     assistant_message = Message(
                         id=str(uuid4()),
                         conversation_id=conversation_id,
                         role="assistant",
                         content=masked.text,
-                        screen_notes=json.dumps([masked.note]) if masked.note else None,
+                        screen_notes=json.dumps(notes),
                         created_at=saved_at,
                     )
                     conversation.updated_at = saved_at
@@ -324,13 +333,13 @@ async def _reply(
                 if together:
                     results = await asyncio.gather(
                         *(
-                            _run_tool_call(call, model, queue, parallel=True)
+                            _run_tool_call(call, model, queue, spend, parallel=True)
                             for call in tool_calls
                         )
                     )
                 else:
                     results = [
-                        await _run_tool_call(call, model, queue, parallel=False)
+                        await _run_tool_call(call, model, queue, spend, parallel=False)
                         for call in tool_calls
                     ]
                 for call, result in zip(tool_calls, results, strict=True):
@@ -448,11 +457,12 @@ async def _run_tool_call(
     call: ToolCall,
     model: Any,
     queue: asyncio.Queue,
+    spend: TurnSpend,
     *,
     parallel: bool,
 ) -> dict:
     if call.name == SPAWN_WORKERS:
-        return await run_spawn(call.arguments.get("tasks"), model, queue)
+        return await run_spawn(call.arguments.get("tasks"), model, queue, spend)
     data = {"tool": call.name, "display_text": display_text(call.name)}
     end = {"tool": call.name}
     if parallel:

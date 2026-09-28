@@ -28,7 +28,10 @@ def test_closing_answer_is_held_masked_then_streamed(client, language_model):
     detail = client.get(f"/api/conversations/{conversation_id}").json()
     assistant = detail["messages"][1]
     assert assistant["content"] == masked
-    assert assistant["screen_notes"] == [note]
+    assert assistant["screen_notes"] == [
+        note,
+        "Screen: 1 model call, 1 token. Today 1 of 50,000.",
+    ]
 
 
 def test_labeled_secret_in_closing_answer_is_masked(client, language_model):
@@ -42,7 +45,10 @@ def test_labeled_secret_in_closing_answer_is_masked(client, language_model):
     ]
     detail = client.get(f"/api/conversations/{conversation_id}").json()
     assert detail["messages"][1]["content"] == "password:[secret]"
-    assert detail["messages"][1]["screen_notes"] == ["Screen: masked 1 secret"]
+    assert detail["messages"][1]["screen_notes"] == [
+        "Screen: masked 1 secret",
+        "Screen: 1 model call, 1 token. Today 1 of 50,000.",
+    ]
 
 
 def test_tool_call_narration_streams_immediately_and_stays_unmasked(client, language_model):
