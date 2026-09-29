@@ -4,8 +4,16 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from fastapi.sse import ServerSentEvent
+from opentelemetry.trace import (
+    Span,
+    SpanKind,
+    Status,
+    StatusCode,
+    Tracer,
+    set_span_in_context,
+)
 
-from app.llm import LanguageModel, ModelUsage, ProviderRejection, ToolCall
+from app.llm import LanguageModel, ModelUsage, ProviderRejection, ToolCall, configured_model_name
 from app.screen import TurnSpend
 from app.tools import (
     DISPLAY_TEXT,
@@ -57,11 +65,51 @@ def _refused_text(item: object) -> str:
     return ""
 
 
+def _mark_spawn_ok(span: Span, *, refused_tasks: int) -> None:
+    span.set_attribute("gen_ai.operation.name", "execute_tool")
+    span.set_attribute("gen_ai.tool.name", SPAWN_WORKERS)
+    span.set_attribute("app.refused_tasks", refused_tasks)
+    span.set_attribute("app.status", "ok")
+    span.set_status(Status(StatusCode.OK))
+
+
+def _mark_spawn_error(span: Span) -> None:
+    span.set_attribute("gen_ai.operation.name", "execute_tool")
+    span.set_attribute("gen_ai.tool.name", SPAWN_WORKERS)
+    span.set_attribute("app.status", "error")
+    span.set_attribute("error.type", "error")
+    span.set_status(Status(StatusCode.ERROR))
+
+
+def _mark_worker_chat_ok(
+    span: Span, *, model: str, usage: ModelUsage | None
+) -> None:
+    span.set_attribute("gen_ai.operation.name", "chat")
+    span.set_attribute("gen_ai.provider.name", "openai")
+    span.set_attribute("gen_ai.request.model", model)
+    span.set_attribute("app.caller", "worker")
+    span.set_attribute("app.status", "ok")
+    span.set_status(Status(StatusCode.OK))
+    if usage is None:
+        return
+    if usage.input_tokens is not None:
+        span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
+    if usage.output_tokens is not None:
+        span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
+
+
 async def run_spawn(
-    raw: object, model: LanguageModel, queue: asyncio.Queue, spend: TurnSpend
+    raw: object,
+    model: LanguageModel,
+    queue: asyncio.Queue,
+    spend: TurnSpend,
+    *,
+    tracer: Tracer,
+    spawn_span: Span,
 ) -> dict:
     plan = _plan(raw)
     if isinstance(plan, str):
+        _mark_spawn_error(spawn_span)
         return {"error": plan}
     started = sum(slot.error is None for slot in plan.slots)
     queue.put_nowait(
@@ -75,19 +123,28 @@ async def run_spawn(
             ServerSentEvent(event="refused_task", data={"display_text": refused_label(task)})
         )
     results = await asyncio.gather(
-        *(_slot_result(slot, model, queue, spend) for slot in plan.slots)
+        *(_slot_result(slot, model, queue, spend, tracer=tracer, spawn_span=spawn_span) for slot in plan.slots)
     )
     queue.put_nowait(ServerSentEvent(event="tool_end", data={"tool": SPAWN_WORKERS}))
+    _mark_spawn_ok(spawn_span, refused_tasks=len(plan.refused))
     return {"workers": list(results), "refused": plan.refused}
 
 
 async def _slot_result(
-    slot: _Slot, model: LanguageModel, queue: asyncio.Queue, spend: TurnSpend
+    slot: _Slot,
+    model: LanguageModel,
+    queue: asyncio.Queue,
+    spend: TurnSpend,
+    *,
+    tracer: Tracer,
+    spawn_span: Span,
 ) -> dict:
     if slot.error is not None:
         return {"task": slot.task, "error": slot.error}
     try:
-        return await _run_worker(slot.task, model, queue, spend)
+        return await _run_worker(
+            slot.task, model, queue, spend, tracer=tracer, spawn_span=spawn_span
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -95,7 +152,13 @@ async def _slot_result(
 
 
 async def _run_worker(
-    task: str, model: LanguageModel, queue: asyncio.Queue, spend: TurnSpend
+    task: str,
+    model: LanguageModel,
+    queue: asyncio.Queue,
+    spend: TurnSpend,
+    *,
+    tracer: Tracer,
+    spawn_span: Span,
 ) -> dict:
     turns: list[dict] = [
         {"role": "system", "content": WORKER_INSTRUCTIONS},
@@ -108,14 +171,24 @@ async def _run_worker(
                 return {"task": task, "error": reason}
             parts: list[str] = []
             tool_calls: list[ToolCall] = []
-            async for event in model.stream(turns, TOOL_SCHEMAS):
-                if isinstance(event, ModelUsage):
-                    await spend.record(event.total_tokens)
-                    continue
-                if isinstance(event, ToolCall):
-                    tool_calls.append(event)
-                    continue
-                parts.append(event)
+            usage: ModelUsage | None = None
+            model_name = configured_model_name()
+            parent_ctx = set_span_in_context(spawn_span)
+            with tracer.start_as_current_span(
+                f"chat {model_name}",
+                context=parent_ctx,
+                kind=SpanKind.INTERNAL,
+            ) as chat_span:
+                async for event in model.stream(turns, TOOL_SCHEMAS):
+                    if isinstance(event, ModelUsage):
+                        usage = event
+                        await spend.record(event.total_tokens)
+                        continue
+                    if isinstance(event, ToolCall):
+                        tool_calls.append(event)
+                        continue
+                    parts.append(event)
+                _mark_worker_chat_ok(chat_span, model=model_name, usage=usage)
             if not tool_calls:
                 return {"task": task, "text": "".join(parts)}
             turns.append(_assistant_turn("".join(parts), tool_calls))
@@ -123,7 +196,9 @@ async def _run_worker(
                 blocked = _blocked_tool(call)
                 if blocked is not None:
                     return {"task": task, "error": blocked}
-                failure = await _run_worker_tool(task, call, turns, queue)
+                failure = await _run_worker_tool(
+                    task, call, turns, queue, tracer=tracer, chat_span=chat_span
+                )
                 if failure is not None:
                     return failure
     except asyncio.CancelledError:
@@ -141,7 +216,13 @@ def _blocked_tool(call: ToolCall) -> str | None:
 
 
 async def _run_worker_tool(
-    task: str, call: ToolCall, turns: list[dict], queue: asyncio.Queue
+    task: str,
+    call: ToolCall,
+    turns: list[dict],
+    queue: asyncio.Queue,
+    *,
+    tracer: Tracer,
+    chat_span: Span,
 ) -> dict | None:
     call_id = str(uuid4())
     queue.put_nowait(
@@ -155,7 +236,17 @@ async def _run_worker_tool(
         )
     )
     try:
-        result = await run_tool(call.name, call.arguments)
+        parent_ctx = set_span_in_context(chat_span)
+        with tracer.start_as_current_span(
+            f"execute_tool {call.name}",
+            context=parent_ctx,
+            kind=SpanKind.INTERNAL,
+        ) as tool_span:
+            result = await run_tool(call.name, call.arguments)
+            tool_span.set_attribute("gen_ai.operation.name", "execute_tool")
+            tool_span.set_attribute("gen_ai.tool.name", call.name)
+            tool_span.set_attribute("app.status", "ok")
+            tool_span.set_status(Status(StatusCode.OK))
     except asyncio.CancelledError:
         raise
     except Exception as exc:

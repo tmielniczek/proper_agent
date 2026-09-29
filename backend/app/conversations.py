@@ -645,7 +645,20 @@ async def _run_tool_call(
     chat_span: Span,
 ) -> dict:
     if call.name == SPAWN_WORKERS:
-        return await run_spawn(call.arguments.get("tasks"), model, queue, spend)
+        parent_ctx = set_span_in_context(chat_span)
+        with tracer.start_as_current_span(
+            f"execute_tool {SPAWN_WORKERS}",
+            context=parent_ctx,
+            kind=SpanKind.INTERNAL,
+        ) as spawn_span:
+            return await run_spawn(
+                call.arguments.get("tasks"),
+                model,
+                queue,
+                spend,
+                tracer=tracer,
+                spawn_span=spawn_span,
+            )
     data = {"tool": call.name, "display_text": display_text(call.name)}
     end = {"tool": call.name}
     if parallel:
