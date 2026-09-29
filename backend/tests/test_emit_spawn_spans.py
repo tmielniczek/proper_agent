@@ -308,7 +308,7 @@ def test_missing_empty_or_non_list_tasks_emit_error_spawn_with_no_worker(
         assert spawn.attributes["gen_ai.operation.name"] == "execute_tool"
         assert spawn.attributes["gen_ai.tool.name"] == SPAWN_WORKERS
         assert _worker_chats(exporter) == []
-        assert "app.refused_tasks" not in (spawn.attributes or {})
+        assert spawn.attributes["app.refused_tasks"] == 0
 
 
 def test_blocked_worker_tool_adds_no_tool_span_and_leaves_chat_ok(

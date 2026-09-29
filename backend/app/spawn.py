@@ -78,6 +78,7 @@ def _mark_spawn_error(span: Span) -> None:
     span.set_attribute("gen_ai.tool.name", SPAWN_WORKERS)
     span.set_attribute("app.status", "error")
     span.set_attribute("error.type", "error")
+    span.set_attribute("app.refused_tasks", 0)
     span.set_status(Status(StatusCode.ERROR))
 
 
