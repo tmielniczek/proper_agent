@@ -9,7 +9,14 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.sse import EventSourceResponse, ServerSentEvent
-from opentelemetry.trace import Span, SpanKind, Status, StatusCode, Tracer
+from opentelemetry.trace import (
+    Span,
+    SpanKind,
+    Status,
+    StatusCode,
+    Tracer,
+    set_span_in_context,
+)
 from pydantic import BaseModel, Field
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -450,13 +457,29 @@ async def _reply(
                 if together:
                     results = await asyncio.gather(
                         *(
-                            _run_tool_call(call, model, queue, spend, parallel=True)
+                            _run_tool_call(
+                                call,
+                                model,
+                                queue,
+                                spend,
+                                parallel=True,
+                                tracer=tracer,
+                                chat_span=chat_span,
+                            )
                             for call in tool_calls
                         )
                     )
                 else:
                     results = [
-                        await _run_tool_call(call, model, queue, spend, parallel=False)
+                        await _run_tool_call(
+                            call,
+                            model,
+                            queue,
+                            spend,
+                            parallel=False,
+                            tracer=tracer,
+                            chat_span=chat_span,
+                        )
                         for call in tool_calls
                     ]
                 for call, result in zip(tool_calls, results, strict=True):
@@ -618,6 +641,8 @@ async def _run_tool_call(
     spend: TurnSpend,
     *,
     parallel: bool,
+    tracer: Tracer,
+    chat_span: Span,
 ) -> dict:
     if call.name == SPAWN_WORKERS:
         return await run_spawn(call.arguments.get("tasks"), model, queue, spend)
@@ -629,7 +654,18 @@ async def _run_tool_call(
         end["call_id"] = call_id
     queue.put_nowait(ServerSentEvent(event="tool_start", data=data))
     try:
-        return await run_tool(call.name, call.arguments)
+        parent_ctx = set_span_in_context(chat_span)
+        with tracer.start_as_current_span(
+            f"execute_tool {call.name}",
+            context=parent_ctx,
+            kind=SpanKind.INTERNAL,
+        ) as tool_span:
+            result = await run_tool(call.name, call.arguments)
+            tool_span.set_attribute("gen_ai.operation.name", "execute_tool")
+            tool_span.set_attribute("gen_ai.tool.name", call.name)
+            tool_span.set_attribute("app.status", "ok")
+            tool_span.set_status(Status(StatusCode.OK))
+            return result
     finally:
         queue.put_nowait(ServerSentEvent(event="tool_end", data=end))
 
