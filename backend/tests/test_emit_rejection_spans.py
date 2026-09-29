@@ -35,6 +35,18 @@ def _chat(client, conversation_id: str, prompt: str):
         return sse_events(response.read().decode())
 
 
+def _chat_that_raises(client, conversation_id: str, prompt: str) -> None:
+    try:
+        with client.stream(
+            "POST",
+            f"/api/conversations/{conversation_id}/chat",
+            json={"prompt": prompt},
+        ) as response:
+            response.read()
+    except Exception:
+        return
+
+
 def _instant_sleep(monkeypatch) -> None:
     async def sleep(_seconds: float) -> None:
         return None
@@ -130,7 +142,7 @@ def test_unknown_lead_tool_marks_tool_and_turn_error(
     ]
     with _client(tmp_path, monkeypatch, language_model, exporter) as client:
         conversation_id = client.post("/api/conversations").json()["id"]
-        _chat(client, conversation_id, "Use a missing tool")
+        _chat_that_raises(client, conversation_id, "Use a missing tool")
 
     tools = [
         span for span in _spans(exporter) if span.name == "execute_tool not_a_tool"
@@ -155,9 +167,8 @@ def test_unexpected_exception_marks_failed_span_and_turn(
     language_model.replies = [[RuntimeError("boom")]]
     with _client(tmp_path, monkeypatch, language_model, exporter) as client:
         conversation_id = client.post("/api/conversations").json()["id"]
-        events = _chat(client, conversation_id, "Blow up")
+        _chat_that_raises(client, conversation_id, "Blow up")
 
-    assert events[-1] == ("error", {"error": "boom"})
     chats = _chats(exporter, "lead")
     assert len(chats) == 1
     _assert_error(chats[0], error_type="RuntimeError")

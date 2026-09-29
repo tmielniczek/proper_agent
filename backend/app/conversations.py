@@ -559,8 +559,7 @@ async def _reply(
         except Exception as exc:
             if run.turn_span is not None:
                 _mark_app_failure(run.turn_span, "error", type(exc).__name__)
-            run.completed = True
-            queue.put_nowait(ServerSentEvent(event="error", data={"error": str(exc)}))
+            raise
         finally:
             queue.put_nowait(None)
 
