@@ -405,6 +405,26 @@ async def _reply(
                         )
                         chat_span.end()
                         raise
+                    except ProviderRejection as rejection:
+                        _mark_chat_provider_rejection(
+                            chat_span,
+                            model=model_name,
+                            caller="lead",
+                            usage=usage,
+                            rejection=rejection,
+                        )
+                        chat_span.end()
+                        raise
+                    except Exception as exc:
+                        _mark_chat_error(
+                            chat_span,
+                            model=model_name,
+                            caller="lead",
+                            usage=usage,
+                            error_type=type(exc).__name__,
+                        )
+                        chat_span.end()
+                        raise
 
                 if not tool_calls:
                     masked = mask_prompt("".join(parts))
@@ -530,8 +550,17 @@ async def _reply(
                 previous_title,
                 previous_updated_at,
             )
+            if run.turn_span is not None:
+                _mark_app_failure(
+                    run.turn_span, "error", _rejection_error_type(rejection)
+                )
             run.completed = True
             queue.put_nowait(ServerSentEvent(event="error", data={"error": str(rejection)}))
+        except Exception as exc:
+            if run.turn_span is not None:
+                _mark_app_failure(run.turn_span, "error", type(exc).__name__)
+            run.completed = True
+            queue.put_nowait(ServerSentEvent(event="error", data={"error": str(exc)}))
         finally:
             queue.put_nowait(None)
 
@@ -672,7 +701,11 @@ async def _run_tool_call(
                 tracer=tracer,
                 spawn_span=spawn_span,
             )
-    data = {"tool": call.name, "display_text": display_text(call.name)}
+    try:
+        label = display_text(call.name)
+    except KeyError:
+        label = call.name
+    data = {"tool": call.name, "display_text": label}
     end = {"tool": call.name}
     if parallel:
         call_id = call.id or str(uuid4())
@@ -697,6 +730,12 @@ async def _run_tool_call(
                 tool_span.set_attribute("gen_ai.operation.name", "execute_tool")
                 tool_span.set_attribute("gen_ai.tool.name", call.name)
                 _mark_app_status(tool_span, "cancelled")
+                tool_span.end()
+                raise
+            except Exception as exc:
+                tool_span.set_attribute("gen_ai.operation.name", "execute_tool")
+                tool_span.set_attribute("gen_ai.tool.name", call.name)
+                _mark_app_failure(tool_span, "error", type(exc).__name__)
                 tool_span.end()
                 raise
     finally:
@@ -797,6 +836,26 @@ async def _summary_brief(
             )
             chat_span.end()
             raise
+        except ProviderRejection as rejection:
+            _mark_chat_provider_rejection(
+                chat_span,
+                model=model_name,
+                caller="summary",
+                usage=model_usage,
+                rejection=rejection,
+            )
+            chat_span.end()
+            raise
+        except Exception as exc:
+            _mark_chat_error(
+                chat_span,
+                model=model_name,
+                caller="summary",
+                usage=model_usage,
+                error_type=type(exc).__name__,
+            )
+            chat_span.end()
+            raise
     if not saw_usage:
         usage = None
     return "".join(parts), usage
@@ -805,6 +864,18 @@ async def _summary_brief(
 def _mark_app_status(span: Span, status: str) -> None:
     span.set_attribute("app.status", status)
     span.set_status(Status(StatusCode.OK))
+
+
+def _mark_app_failure(span: Span, status: str, error_type: str) -> None:
+    span.set_attribute("app.status", status)
+    span.set_attribute("error.type", error_type)
+    span.set_status(Status(StatusCode.ERROR))
+
+
+def _rejection_error_type(rejection: ProviderRejection) -> str:
+    if rejection.status_code is not None:
+        return str(rejection.status_code)
+    return type(rejection).__name__
 
 
 def _mark_chat_attrs(
@@ -834,6 +905,30 @@ def _mark_chat_cancelled(
 ) -> None:
     _mark_chat_attrs(span, model=model, caller=caller, usage=usage)
     _mark_app_status(span, "cancelled")
+
+
+def _mark_chat_provider_rejection(
+    span: Span,
+    *,
+    model: str,
+    caller: str,
+    usage: ModelUsage | None,
+    rejection: ProviderRejection,
+) -> None:
+    _mark_chat_attrs(span, model=model, caller=caller, usage=usage)
+    _mark_app_failure(span, "provider_rejection", _rejection_error_type(rejection))
+
+
+def _mark_chat_error(
+    span: Span,
+    *,
+    model: str,
+    caller: str,
+    usage: ModelUsage | None,
+    error_type: str,
+) -> None:
+    _mark_chat_attrs(span, model=model, caller=caller, usage=usage)
+    _mark_app_failure(span, "error", error_type)
 
 
 async def _require_conversation(session: AsyncSession, conversation_id: str) -> Conversation:

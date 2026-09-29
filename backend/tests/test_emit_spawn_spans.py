@@ -244,7 +244,7 @@ def test_spawn_that_returns_its_batch_stays_ok_when_a_worker_fails(
     _instant_sleep(monkeypatch)
     language_model.replies = [
         [_spawn(["weather in Berlin", "weather in Paris"])],
-        [ProviderRejection("The request was rate-limited")],
+        [ProviderRejection("The request was rate-limited", status_code=429)],
         ["Sunny in Paris"],
         ["Paris is sunny."],
     ]
@@ -258,8 +258,18 @@ def test_spawn_that_returns_its_batch_stays_ok_when_a_worker_fails(
     assert "error.type" not in (spawn.attributes or {})
     assert spawn.attributes["app.refused_tasks"] == 0
     workers = _worker_chats(exporter)
-    assert len(workers) == 1
-    assert workers[0].attributes["app.status"] == "ok"
+    assert len(workers) == 2
+    by_status = {span.attributes["app.status"] for span in workers}
+    assert by_status == {"ok", "provider_rejection"}
+    rejected = [
+        span for span in workers if span.attributes["app.status"] == "provider_rejection"
+    ][0]
+    assert rejected.attributes["error.type"] == "429"
+    assert rejected.status.status_code == StatusCode.ERROR
+    turn = [span for span in _spans(exporter) if span.name == "turn"][0]
+    assert turn.attributes["app.status"] == "ok"
+    assert "error.type" not in (turn.attributes or {})
+    assert turn.status.status_code == StatusCode.OK
 
 
 def test_blank_task_starts_no_worker_span_and_leaves_spawn_ok(

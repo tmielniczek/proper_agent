@@ -26,7 +26,9 @@ class ModelUsage:
 
 
 class ProviderRejection(Exception):
-    pass
+    def __init__(self, message: str = "", *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class LanguageModel(Protocol):
@@ -144,9 +146,9 @@ class OpenAILanguageModel:
 
 def _provider_rejection(exc: APIStatusError) -> ProviderRejection | None:
     if exc.status_code == 401:
-        return ProviderRejection("The API key was rejected")
+        return ProviderRejection("The API key was rejected", status_code=401)
     if exc.status_code == 429:
-        return ProviderRejection("The request was rate-limited")
+        return ProviderRejection("The request was rate-limited", status_code=429)
     return None
 
 

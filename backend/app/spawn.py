@@ -99,6 +99,33 @@ def _mark_worker_chat_ok(
         span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
 
 
+def _mark_worker_chat_provider_rejection(
+    span: Span,
+    *,
+    model: str,
+    usage: ModelUsage | None,
+    rejection: ProviderRejection,
+) -> None:
+    span.set_attribute("gen_ai.operation.name", "chat")
+    span.set_attribute("gen_ai.provider.name", "openai")
+    span.set_attribute("gen_ai.request.model", model)
+    span.set_attribute("app.caller", "worker")
+    span.set_attribute("app.status", "provider_rejection")
+    error_type = (
+        str(rejection.status_code)
+        if rejection.status_code is not None
+        else type(rejection).__name__
+    )
+    span.set_attribute("error.type", error_type)
+    span.set_status(Status(StatusCode.ERROR))
+    if usage is None:
+        return
+    if usage.input_tokens is not None:
+        span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
+    if usage.output_tokens is not None:
+        span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
+
+
 async def run_spawn(
     raw: object,
     model: LanguageModel,
@@ -180,16 +207,23 @@ async def _run_worker(
                 context=parent_ctx,
                 kind=SpanKind.INTERNAL,
             ) as chat_span:
-                async for event in model.stream(turns, TOOL_SCHEMAS):
-                    if isinstance(event, ModelUsage):
-                        usage = event
-                        await spend.record(event.total_tokens)
-                        continue
-                    if isinstance(event, ToolCall):
-                        tool_calls.append(event)
-                        continue
-                    parts.append(event)
-                _mark_worker_chat_ok(chat_span, model=model_name, usage=usage)
+                try:
+                    async for event in model.stream(turns, TOOL_SCHEMAS):
+                        if isinstance(event, ModelUsage):
+                            usage = event
+                            await spend.record(event.total_tokens)
+                            continue
+                        if isinstance(event, ToolCall):
+                            tool_calls.append(event)
+                            continue
+                        parts.append(event)
+                    _mark_worker_chat_ok(chat_span, model=model_name, usage=usage)
+                except ProviderRejection as rejection:
+                    _mark_worker_chat_provider_rejection(
+                        chat_span, model=model_name, usage=usage, rejection=rejection
+                    )
+                    chat_span.end()
+                    raise
             if not tool_calls:
                 return {"task": task, "text": "".join(parts)}
             turns.append(_assistant_turn("".join(parts), tool_calls))
