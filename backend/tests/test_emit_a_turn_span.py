@@ -134,9 +134,9 @@ def test_finished_in_cap_reply_emits_an_ok_turn(
     assert language_model.calls
 
     spans = exporter.get_finished_spans()
-    assert len(spans) == 1
-    span = spans[0]
-    assert span.name == "turn"
+    turn_spans = [span for span in spans if span.name == "turn"]
+    assert len(turn_spans) == 1
+    span = turn_spans[0]
     assert span.kind == SpanKind.INTERNAL
     assert span.resource.attributes["service.name"] == "agent-chat"
     assert span.attributes["app.status"] == "ok"
@@ -144,3 +144,4 @@ def test_finished_in_cap_reply_emits_an_ok_turn(
     assert "error.type" not in (span.attributes or {})
     assert prompt not in _attribute_values(span)
     assert "Hello there" not in _attribute_values(span)
+    assert any(span.name.startswith("chat ") for span in spans)

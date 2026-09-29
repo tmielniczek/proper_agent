@@ -21,6 +21,8 @@ class ToolCall:
 @dataclass(frozen=True)
 class ModelUsage:
     total_tokens: int | None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class ProviderRejection(Exception):
@@ -33,6 +35,9 @@ class LanguageModel(Protocol):
     ) -> AsyncIterator[str | ToolCall | ModelUsage]: ...
 
 
+_FALLBACK_MODEL = "gpt-4o-mini"
+
+
 def load_local_env() -> None:
     env_path = Path(__file__).resolve().parents[2] / ".env"
     if not env_path.is_file():
@@ -43,6 +48,11 @@ def load_local_env() -> None:
             continue
         key, value = line.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip())
+
+
+def configured_model_name() -> str:
+    load_local_env()
+    return os.environ.get("LLM_MODEL") or os.environ.get("MODEL_NAME") or _FALLBACK_MODEL
 
 
 def model_from_env() -> "OpenAILanguageModel":
@@ -84,12 +94,16 @@ class OpenAILanguageModel:
         try:
             pending: dict[int, dict[str, str]] = {}
             reported_total: int | None = None
+            reported_input: int | None = None
+            reported_output: int | None = None
             saw_usage = False
             async for chunk in response:
                 usage = getattr(chunk, "usage", None)
                 if usage is not None:
                     saw_usage = True
                     reported_total = getattr(usage, "total_tokens", None)
+                    reported_input = getattr(usage, "prompt_tokens", None)
+                    reported_output = getattr(usage, "completion_tokens", None)
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -117,7 +131,11 @@ class OpenAILanguageModel:
                     name=slot["name"],
                     arguments=_tool_arguments(slot["arguments"]),
                 )
-            yield ModelUsage(total_tokens=reported_total if saw_usage else None)
+            yield ModelUsage(
+                total_tokens=reported_total if saw_usage else None,
+                input_tokens=reported_input if saw_usage else None,
+                output_tokens=reported_output if saw_usage else None,
+            )
         finally:
             close = getattr(response, "close", None)
             if close is not None:

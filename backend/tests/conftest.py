@@ -13,6 +13,8 @@ class RecordingModel:
         self.calls: list[list[dict]] = []
         self.offered_tools: list[list[dict] | None] = []
         self.token_totals: list[int | None] = []
+        self.input_tokens: list[int] = []
+        self.output_tokens: list[int] = []
         self.reply_for = None
         self.hold_after_chunks: int | None = None
         self.holding = threading.Event()
@@ -38,7 +40,13 @@ class RecordingModel:
             self.yielded.append(chunk)
             yield chunk
         total = self.token_totals.pop(0) if self.token_totals else 1
-        yield ModelUsage(total_tokens=total)
+        input_tokens = self.input_tokens.pop(0) if self.input_tokens else None
+        output_tokens = self.output_tokens.pop(0) if self.output_tokens else None
+        yield ModelUsage(
+            total_tokens=total,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
 
 
 @pytest.fixture

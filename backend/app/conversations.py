@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.sse import EventSourceResponse, ServerSentEvent
-from opentelemetry.trace import Span, SpanKind, Status, StatusCode
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode, Tracer
 from pydantic import BaseModel, Field
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -28,7 +28,7 @@ from app.compaction import (
 )
 from app.tokens import count_messages
 from app.db import get_session
-from app.llm import ModelUsage, ProviderRejection, ToolCall, model_from_env
+from app.llm import ModelUsage, ProviderRejection, ToolCall, configured_model_name, model_from_env
 from app.models import Conversation, Message
 from app.memory import memory_preface
 from app.screen import (
@@ -284,6 +284,7 @@ async def chat(
                 previous_updated_at,
                 released,
                 request.app.state.context_window,
+                request.app.state.tracer,
             )
         )
         _runs[conversation_id] = run
@@ -337,6 +338,7 @@ async def _reply(
     previous_updated_at: datetime,
     released: asyncio.Event,
     context_window: int,
+    tracer: Tracer,
 ) -> None:
     await released.wait()
     assert db.session_factory is not None
@@ -350,7 +352,13 @@ async def _reply(
         try:
             while True:
                 outgoing = await _lead_messages(
-                    turns, model, context_window, conversation_id, spend, queue
+                    turns,
+                    model,
+                    context_window,
+                    conversation_id,
+                    spend,
+                    queue,
+                    tracer,
                 )
                 if isinstance(outgoing, str):
                     await _stop_turn(
@@ -366,14 +374,21 @@ async def _reply(
 
                 parts: list[str] = []
                 tool_calls: list[ToolCall] = []
-                async for event in model.stream(outgoing, LEAD_TOOL_SCHEMAS):
-                    if isinstance(event, ModelUsage):
-                        await spend.record(event.total_tokens)
-                        continue
-                    if isinstance(event, ToolCall):
-                        tool_calls.append(event)
-                        continue
-                    parts.append(event)
+                model_name = configured_model_name()
+                usage: ModelUsage | None = None
+                with tracer.start_as_current_span(
+                    f"chat {model_name}", kind=SpanKind.INTERNAL
+                ) as chat_span:
+                    async for event in model.stream(outgoing, LEAD_TOOL_SCHEMAS):
+                        if isinstance(event, ModelUsage):
+                            usage = event
+                            await spend.record(event.total_tokens)
+                            continue
+                        if isinstance(event, ToolCall):
+                            tool_calls.append(event)
+                            continue
+                        parts.append(event)
+                    _mark_chat_ok(chat_span, model=model_name, caller="lead", usage=usage)
 
                 if not tool_calls:
                     masked = mask_prompt("".join(parts))
@@ -656,6 +671,7 @@ async def _lead_messages(
     conversation_id: str,
     spend: TurnSpend,
     queue: asyncio.Queue[ServerSentEvent | None],
+    tracer: Tracer,
 ) -> list[dict] | str:
     view = lead_view(turns, context_window, rolling_for(conversation_id))
     if view.stop is not None:
@@ -668,7 +684,7 @@ async def _lead_messages(
     if reason is not None:
         return reason
     try:
-        brief, usage = await _summary_brief(model, view)
+        brief, usage = await _summary_brief(model, view, tracer)
     except ProviderRejection:
         return STOPPED_TOO_LARGE
     await spend.record(usage, spend_turn=False)
@@ -685,20 +701,46 @@ async def _lead_messages(
     return messages
 
 
-async def _summary_brief(model: Any, view: LeadView) -> tuple[str, int | None]:
+async def _summary_brief(
+    model: Any, view: LeadView, tracer: Tracer
+) -> tuple[str, int | None]:
     parts: list[str] = []
     usage: int | None = None
     saw_usage = False
-    async for event in model.stream(view.summary_messages, []):
-        if isinstance(event, ModelUsage):
-            usage = event.total_tokens
-            saw_usage = True
-            continue
-        if isinstance(event, str):
-            parts.append(event)
+    model_name = configured_model_name()
+    model_usage: ModelUsage | None = None
+    with tracer.start_as_current_span(
+        f"chat {model_name}", kind=SpanKind.INTERNAL
+    ) as chat_span:
+        async for event in model.stream(view.summary_messages, []):
+            if isinstance(event, ModelUsage):
+                model_usage = event
+                usage = event.total_tokens
+                saw_usage = True
+                continue
+            if isinstance(event, str):
+                parts.append(event)
+        _mark_chat_ok(chat_span, model=model_name, caller="summary", usage=model_usage)
     if not saw_usage:
         usage = None
     return "".join(parts), usage
+
+
+def _mark_chat_ok(
+    span: Span, *, model: str, caller: str, usage: ModelUsage | None
+) -> None:
+    span.set_attribute("gen_ai.operation.name", "chat")
+    span.set_attribute("gen_ai.provider.name", "openai")
+    span.set_attribute("gen_ai.request.model", model)
+    span.set_attribute("app.caller", caller)
+    span.set_attribute("app.status", "ok")
+    span.set_status(Status(StatusCode.OK))
+    if usage is None:
+        return
+    if usage.input_tokens is not None:
+        span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
+    if usage.output_tokens is not None:
+        span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
 
 
 async def _require_conversation(session: AsyncSession, conversation_id: str) -> Conversation:
