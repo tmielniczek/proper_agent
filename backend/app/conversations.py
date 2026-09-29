@@ -386,16 +386,25 @@ async def _reply(
                 with tracer.start_as_current_span(
                     f"chat {model_name}", kind=SpanKind.INTERNAL
                 ) as chat_span:
-                    async for event in model.stream(outgoing, LEAD_TOOL_SCHEMAS):
-                        if isinstance(event, ModelUsage):
-                            usage = event
-                            await spend.record(event.total_tokens)
-                            continue
-                        if isinstance(event, ToolCall):
-                            tool_calls.append(event)
-                            continue
-                        parts.append(event)
-                    _mark_chat_ok(chat_span, model=model_name, caller="lead", usage=usage)
+                    try:
+                        async for event in model.stream(outgoing, LEAD_TOOL_SCHEMAS):
+                            if isinstance(event, ModelUsage):
+                                usage = event
+                                await spend.record(event.total_tokens)
+                                continue
+                            if isinstance(event, ToolCall):
+                                tool_calls.append(event)
+                                continue
+                            parts.append(event)
+                        _mark_chat_ok(
+                            chat_span, model=model_name, caller="lead", usage=usage
+                        )
+                    except asyncio.CancelledError:
+                        _mark_chat_cancelled(
+                            chat_span, model=model_name, caller="lead", usage=usage
+                        )
+                        chat_span.end()
+                        raise
 
                 if not tool_calls:
                     masked = mask_prompt("".join(parts))
@@ -509,6 +518,8 @@ async def _reply(
                     )
                     return
         except asyncio.CancelledError:
+            if run.turn_span is not None:
+                _mark_app_status(run.turn_span, "cancelled")
             _clear_cancellation()
             raise
         except ProviderRejection as rejection:
@@ -546,6 +557,8 @@ async def _stop_turn(
     session.add(assistant_message)
     session.add(conversation)
     await session.commit()
+    if run.turn_span is not None:
+        _mark_app_status(run.turn_span, "stopped")
     run.completed = True
     queue.put_nowait(
         ServerSentEvent(event="done", data={"message_id": assistant_message.id})
@@ -673,12 +686,19 @@ async def _run_tool_call(
             context=parent_ctx,
             kind=SpanKind.INTERNAL,
         ) as tool_span:
-            result = await run_tool(call.name, call.arguments)
-            tool_span.set_attribute("gen_ai.operation.name", "execute_tool")
-            tool_span.set_attribute("gen_ai.tool.name", call.name)
-            tool_span.set_attribute("app.status", "ok")
-            tool_span.set_status(Status(StatusCode.OK))
-            return result
+            try:
+                result = await run_tool(call.name, call.arguments)
+                tool_span.set_attribute("gen_ai.operation.name", "execute_tool")
+                tool_span.set_attribute("gen_ai.tool.name", call.name)
+                tool_span.set_attribute("app.status", "ok")
+                tool_span.set_status(Status(StatusCode.OK))
+                return result
+            except asyncio.CancelledError:
+                tool_span.set_attribute("gen_ai.operation.name", "execute_tool")
+                tool_span.set_attribute("gen_ai.tool.name", call.name)
+                _mark_app_status(tool_span, "cancelled")
+                tool_span.end()
+                raise
     finally:
         queue.put_nowait(ServerSentEvent(event="tool_end", data=end))
 
@@ -761,35 +781,59 @@ async def _summary_brief(
     with tracer.start_as_current_span(
         f"chat {model_name}", kind=SpanKind.INTERNAL
     ) as chat_span:
-        async for event in model.stream(view.summary_messages, []):
-            if isinstance(event, ModelUsage):
-                model_usage = event
-                usage = event.total_tokens
-                saw_usage = True
-                continue
-            if isinstance(event, str):
-                parts.append(event)
-        _mark_chat_ok(chat_span, model=model_name, caller="summary", usage=model_usage)
+        try:
+            async for event in model.stream(view.summary_messages, []):
+                if isinstance(event, ModelUsage):
+                    model_usage = event
+                    usage = event.total_tokens
+                    saw_usage = True
+                    continue
+                if isinstance(event, str):
+                    parts.append(event)
+            _mark_chat_ok(chat_span, model=model_name, caller="summary", usage=model_usage)
+        except asyncio.CancelledError:
+            _mark_chat_cancelled(
+                chat_span, model=model_name, caller="summary", usage=model_usage
+            )
+            chat_span.end()
+            raise
     if not saw_usage:
         usage = None
     return "".join(parts), usage
 
 
-def _mark_chat_ok(
+def _mark_app_status(span: Span, status: str) -> None:
+    span.set_attribute("app.status", status)
+    span.set_status(Status(StatusCode.OK))
+
+
+def _mark_chat_attrs(
     span: Span, *, model: str, caller: str, usage: ModelUsage | None
 ) -> None:
     span.set_attribute("gen_ai.operation.name", "chat")
     span.set_attribute("gen_ai.provider.name", "openai")
     span.set_attribute("gen_ai.request.model", model)
     span.set_attribute("app.caller", caller)
-    span.set_attribute("app.status", "ok")
-    span.set_status(Status(StatusCode.OK))
     if usage is None:
         return
     if usage.input_tokens is not None:
         span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
     if usage.output_tokens is not None:
         span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
+
+
+def _mark_chat_ok(
+    span: Span, *, model: str, caller: str, usage: ModelUsage | None
+) -> None:
+    _mark_chat_attrs(span, model=model, caller=caller, usage=usage)
+    _mark_app_status(span, "ok")
+
+
+def _mark_chat_cancelled(
+    span: Span, *, model: str, caller: str, usage: ModelUsage | None
+) -> None:
+    _mark_chat_attrs(span, model=model, caller=caller, usage=usage)
+    _mark_app_status(span, "cancelled")
 
 
 async def _require_conversation(session: AsyncSession, conversation_id: str) -> Conversation:
