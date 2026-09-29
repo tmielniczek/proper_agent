@@ -4,6 +4,10 @@ A single-user chat where a lead answers each turn and may hand independent tasks
 
 ## Language
 
+**Turn**:
+The work from one user prompt until a final text, a stop, a refusal, a rejection, or a cancel.
+_Avoid_: Request, session
+
 **Lead**:
 The agent that owns the user's turn and may start workers to carry out tasks.
 _Avoid_: Main agent, parent agent, orchestrator
@@ -35,6 +39,14 @@ _Avoid_: Middleware, interceptor, guardrail
 **Screen note**:
 A status line in the thread that records a mask or the cost of a finished turn, without the secret.
 _Avoid_: Log, middleware log
+
+**Model call**:
+A request to the language model. The lead, a worker, or compaction may make one.
+_Avoid_: LLM request, completion
+
+**Tool run**:
+One execution of a tool a model call requested.
+_Avoid_: Invocation, function call
 
 **Mask**:
 A social security number, card number, or labeled secret replaced in a prompt or in the lead's final text before that text is stored or shown.
