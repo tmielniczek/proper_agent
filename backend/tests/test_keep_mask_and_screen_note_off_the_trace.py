@@ -63,10 +63,11 @@ def test_masked_finished_turn_keeps_screen_and_leaves_secret_off_spans(
     chat_spans = [span for span in spans if span.name.startswith("chat ")]
     assert len(turn_spans) == 1
     assert len(chat_spans) == 1
+    assert {span.name for span in spans} == {turn_spans[0].name, chat_spans[0].name}
     assert turn_spans[0].attributes["app.status"] == "ok"
     assert chat_spans[0].attributes["app.status"] == "ok"
 
-    for span in (*turn_spans, *chat_spans):
+    for span in spans:
         values = _attribute_values(span)
         assert SECRET not in values
         assert MASK_NOTE not in values
