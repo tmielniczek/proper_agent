@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.sse import EventSourceResponse, ServerSentEvent
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 from pydantic import BaseModel, Field
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -54,6 +55,7 @@ class _Run:
     user_message_id: str
     task: asyncio.Task[None] | None = None
     completed: bool = False
+    turn_span: Span | None = None
 
 
 _runs: dict[str, _Run] = {}
@@ -190,115 +192,120 @@ async def chat(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> AsyncIterator[ServerSentEvent]:
-    conversation = await _require_conversation(session, conversation_id)
-    previous_title = conversation.title
-    previous_updated_at = conversation.updated_at
-    masked = mask_prompt(body.prompt)
-    phrase_refused = matches_phrase_list(body.prompt)
-    budget_refused = (not phrase_refused) and (
-        await today_tokens() >= DAILY_TOKEN_BUDGET
-    )
-    refusal = (
-        PHRASE_LIST_REFUSAL
-        if phrase_refused
-        else (STOPPED_DAILY_BUDGET if budget_refused else None)
-    )
-    existing_user_messages = await session.exec(
-        select(Message).where(
-            Message.conversation_id == conversation_id,
-            Message.role == "user",
+    with request.app.state.tracer.start_as_current_span(
+        "turn", kind=SpanKind.INTERNAL
+    ) as turn_span:
+        conversation = await _require_conversation(session, conversation_id)
+        previous_title = conversation.title
+        previous_updated_at = conversation.updated_at
+        masked = mask_prompt(body.prompt)
+        phrase_refused = matches_phrase_list(body.prompt)
+        budget_refused = (not phrase_refused) and (
+            await today_tokens() >= DAILY_TOKEN_BUDGET
         )
-    )
-    if existing_user_messages.first() is None:
-        conversation.title = masked.text[:30]
+        refusal = (
+            PHRASE_LIST_REFUSAL
+            if phrase_refused
+            else (STOPPED_DAILY_BUDGET if budget_refused else None)
+        )
+        existing_user_messages = await session.exec(
+            select(Message).where(
+                Message.conversation_id == conversation_id,
+                Message.role == "user",
+            )
+        )
+        if existing_user_messages.first() is None:
+            conversation.title = masked.text[:30]
 
-    now = next_timestamp()
-    user_message = Message(
-        id=str(uuid4()),
-        conversation_id=conversation_id,
-        role="user",
-        content=masked.text,
-        screen_notes=(
-            None
-            if refusal is not None
-            else (json.dumps([masked.note]) if masked.note else None)
-        ),
-        created_at=now,
-    )
-    conversation.updated_at = now
-    session.add(user_message)
-    session.add(conversation)
-
-    if refusal is not None:
-        refused_at = next_timestamp()
-        assistant_message = Message(
+        now = next_timestamp()
+        user_message = Message(
             id=str(uuid4()),
             conversation_id=conversation_id,
-            role="assistant",
-            content=refusal,
-            created_at=refused_at,
+            role="user",
+            content=masked.text,
+            screen_notes=(
+                None
+                if refusal is not None
+                else (json.dumps([masked.note]) if masked.note else None)
+            ),
+            created_at=now,
         )
-        conversation.updated_at = refused_at
-        session.add(assistant_message)
+        conversation.updated_at = now
+        session.add(user_message)
         session.add(conversation)
+
+        if refusal is not None:
+            turn_span.set_attribute("app.status", "refused")
+            turn_span.set_status(Status(StatusCode.OK))
+            refused_at = next_timestamp()
+            assistant_message = Message(
+                id=str(uuid4()),
+                conversation_id=conversation_id,
+                role="assistant",
+                content=refusal,
+                created_at=refused_at,
+            )
+            conversation.updated_at = refused_at
+            session.add(assistant_message)
+            session.add(conversation)
+            await session.commit()
+            yield ServerSentEvent(event="prompt", data={"text": masked.text})
+            yield ServerSentEvent(event="delta", data={"text": refusal})
+            yield ServerSentEvent(
+                event="done", data={"message_id": assistant_message.id}
+            )
+            return
+
         await session.commit()
-        yield ServerSentEvent(event="prompt", data={"text": masked.text})
-        yield ServerSentEvent(event="delta", data={"text": refusal})
-        yield ServerSentEvent(
-            event="done", data={"message_id": assistant_message.id}
+
+        history = await session.exec(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc())
         )
-        return
+        turns = [_turn(message) for message in history.all()]
 
-    await session.commit()
+        model = request.app.state.language_model
+        if model is None:
+            model = model_from_env()
+            request.app.state.language_model = model
 
-    history = await session.exec(
-        select(Message)
-        .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.asc())
-    )
-    turns = [_turn(message) for message in history.all()]
-
-    model = request.app.state.language_model
-    if model is None:
-        model = model_from_env()
-        request.app.state.language_model = model
-
-    queue: asyncio.Queue[ServerSentEvent | None] = asyncio.Queue()
-    released = asyncio.Event()
-    run = _Run(user_message_id=user_message.id)
-    run.task = asyncio.create_task(
-        _reply(
-            conversation_id,
-            turns,
-            model,
-            queue,
-            run,
-            previous_title,
-            previous_updated_at,
-            released,
-            request.app.state.context_window,
+        queue: asyncio.Queue[ServerSentEvent | None] = asyncio.Queue()
+        released = asyncio.Event()
+        run = _Run(user_message_id=user_message.id, turn_span=turn_span)
+        run.task = asyncio.create_task(
+            _reply(
+                conversation_id,
+                turns,
+                model,
+                queue,
+                run,
+                previous_title,
+                previous_updated_at,
+                released,
+                request.app.state.context_window,
+            )
         )
-    )
-    _runs[conversation_id] = run
-    try:
-        yield ServerSentEvent(event="prompt", data={"text": masked.text})
-        if masked.note is not None:
-            yield ServerSentEvent(event="screen", data={"text": masked.note})
-        released.set()
-        while True:
-            event = await queue.get()
-            if event is None:
-                break
-            yield event
-    finally:
-        task = run.task
-        if task is not None and not task.done():
-            task.cancel()
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        if run.completed and _runs.get(conversation_id) is run:
-            del _runs[conversation_id]
+        _runs[conversation_id] = run
+        try:
+            yield ServerSentEvent(event="prompt", data={"text": masked.text})
+            if masked.note is not None:
+                yield ServerSentEvent(event="screen", data={"text": masked.note})
+            released.set()
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield event
+        finally:
+            task = run.task
+            if task is not None and not task.done():
+                task.cancel()
+            if task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            if run.completed and _runs.get(conversation_id) is run:
+                del _runs[conversation_id]
 
 
 @router.post("/{conversation_id}/cancel", status_code=204)
@@ -396,6 +403,9 @@ async def _reply(
                     session.add(assistant_message)
                     session.add(conversation)
                     await session.commit()
+                    if run.turn_span is not None:
+                        run.turn_span.set_attribute("app.status", "ok")
+                        run.turn_span.set_status(Status(StatusCode.OK))
                     run.completed = True
                     queue.put_nowait(
                         ServerSentEvent(event="done", data={"message_id": assistant_message.id})

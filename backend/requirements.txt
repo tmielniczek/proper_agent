@@ -6,3 +6,5 @@ pytest
 httpx
 openai
 tiktoken
+opentelemetry-api
+opentelemetry-sdk
