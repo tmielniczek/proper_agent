@@ -768,15 +768,22 @@ async def _summary_brief(
     with tracer.start_as_current_span(
         f"chat {model_name}", kind=SpanKind.INTERNAL
     ) as chat_span:
-        async for event in model.stream(view.summary_messages, []):
-            if isinstance(event, ModelUsage):
-                model_usage = event
-                usage = event.total_tokens
-                saw_usage = True
-                continue
-            if isinstance(event, str):
-                parts.append(event)
-        _mark_chat_ok(chat_span, model=model_name, caller="summary", usage=model_usage)
+        try:
+            async for event in model.stream(view.summary_messages, []):
+                if isinstance(event, ModelUsage):
+                    model_usage = event
+                    usage = event.total_tokens
+                    saw_usage = True
+                    continue
+                if isinstance(event, str):
+                    parts.append(event)
+            _mark_chat_ok(chat_span, model=model_name, caller="summary", usage=model_usage)
+        except asyncio.CancelledError:
+            _mark_chat_cancelled(
+                chat_span, model=model_name, caller="summary", usage=model_usage
+            )
+            chat_span.end()
+            raise
     if not saw_usage:
         usage = None
     return "".join(parts), usage

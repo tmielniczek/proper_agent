@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.compaction import STOPPED_TOO_LARGE
 from app.llm import ToolCall
 from app.screen import STOPPED_CALL_CAP, STOPPED_TOKEN_CAP
+from app.tokens import text_with_tokens
 from test_stream_assistant_reply import sse_events
 
 MODEL_NAME = "gpt-5-nano"
@@ -294,4 +295,33 @@ def test_ended_sibling_chat_keeps_ok_when_later_chat_is_cancelled(
     assert turn[0].attributes["app.status"] == "cancelled"
     _assert_not_error(chats[0])
     _assert_not_error(chats[1])
+    _assert_not_error(turn[0])
+
+
+def test_cancel_during_summary_stream_marks_that_chat_cancelled(
+    tmp_path, monkeypatch, language_model
+):
+    exporter = InMemorySpanExporter()
+    language_model.replies = [[text_with_tokens(150)], ["Noted."]]
+    with _client(tmp_path, monkeypatch, language_model, exporter) as client:
+        conversation_id = client.post("/api/conversations").json()["id"]
+        for prompt in ("alpha", "beta", "gamma", "delta"):
+            _chat(client, conversation_id, prompt)
+        exporter.clear()
+        client.app.state.context_window = 200
+        language_model.replies = [["Kept."]]
+        language_model.hold_after_chunks = 0
+        language_model.holding.clear()
+        language_model.release.clear()
+        _cancel_while_holding(
+            client, conversation_id, language_model.holding, language_model.release
+        )
+
+    chats = _spans_by_name(exporter, "chat ")
+    turn = _spans_by_name(exporter, "turn")
+    assert len(chats) == 1
+    assert chats[0].attributes["app.caller"] == "summary"
+    assert chats[0].attributes["app.status"] == "cancelled"
+    assert turn[0].attributes["app.status"] == "cancelled"
+    _assert_not_error(chats[0])
     _assert_not_error(turn[0])
