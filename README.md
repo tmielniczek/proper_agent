@@ -1,20 +1,34 @@
 # Agent chat
 
-A local, single-user chat. A lead answers each turn, calls mocked tools, and hands independent tasks to workers.
+A local, single-user chat.
 
 ## Why I Built This
 
-A chat box that only streams tokens hides the rest of an agent: tool runs, parallel work, secrets in the transcript, a filling context window, and spend with no ceiling. This app is a small local demo of that loop. The thread stays the full conversation. Caps, masking, compaction, and a console trace sit around it so a turn is visible without sending secrets to the model or into telemetry.
+I built this to learn how AI agents actually work under the hood.
+
+Most chat apps only show you the text streaming in. A real agent does a lot more behind the scenes:
+
+- it calls tools,
+- it splits work across helpers that run at the same time,
+- it can leak secrets you typed,
+- it fills up its memory (the context window),
+- and it can burn money with no limit.
+
+This app makes all of that visible in one small local project. Your chat history stays complete. Around it I added spending caps, secret masking, chat compression, and a log of every turn, so you can see what happens without sending your secrets to the model or into the logs.
+
 
 ## Features
 
-- Streaming replies over server-sent events. Cancel aborts the turn upstream.
-- Mocked tools with a short random delay: weather, database search, and a calculator. Several tool calls in one reply run together.
-- The lead can spawn up to five workers on independent tasks. Workers do not see the conversation, cannot spawn, and a sixth task is refused.
-- App-wide memory: ask the lead to remember a fact and later turns include the newest memories (up to twenty). Workers never see that list.
-- A screen masks social security numbers, card numbers, and labeled secrets in your prompt and in the lead's closing answer. It refuses a fixed list of "ignore instructions" phrases, and stops a turn when a per-turn or daily token cap is already hit.
-- Compaction for long chats: the stored transcript stays complete. A lead call past 80% of a 50,000-token window gets the first message, a rolling summary, and a recent tail that keeps a tool burst whole.
-- One OpenTelemetry trace per turn, printed to the console. Spans cover the turn, model calls, and tool runs. Prompt text, secrets, tool arguments, and memory stay off the trace.
+- **Live replies.** Text streams in as it's written. Hitting Cancel actually stops the request.
+- **Fake tools.** Weather, database search, and a calculator. They're mocked with a short random delay to feel real. If the model asks for several tools at once, they run together.
+- **Workers.** The main agent (the "lead") can hand off up to 5 independent tasks to workers. Workers only see their own task, not your chat. They can't create more workers. A 6th task is refused.
+- **Memory.** Say "remember that..." and the lead saves it. Future chats include your newest 20 memories. Workers never see them.
+- **Safety screen.** 
+  - Hides social security numbers, card numbers, and labeled secrets (like `api_key: ...`) in your message and in the lead's final answer.
+  - Blocks known "ignore your instructions" phrases.
+  - Stops a turn if you've already hit the per-turn or daily token limit.
+- **Compression for long chats.** The model's memory holds 50,000 tokens. Once a request would go past 80% of that, the lead gets a shortened version: your first message, a running summary, and the latest messages (a tool call and its results are always kept together). Your saved chat is never cut.
+- **Turn tracing.** Each turn prints one OpenTelemetry trace to the console: the turn, each model call, and each tool run. Your prompts, secrets, tool inputs, and memories are never included.
 
 ## Tech Stack
 
@@ -110,13 +124,13 @@ The API prints one trace per turn: a `turn` span, then `chat` and `execute_tool`
 
 ## Challenges & Learnings
 
-Masking every model call would drop things that must stay as written. Tool narration streams immediately. Worker tasks and saved memories stay verbatim. The screen runs on the user's prompt and the lead's closing answer. The cost check still runs before every model call, including workers.
+**Not everything can be masked.** If I masked every model call, some things would break. Tool status messages need to show instantly. Worker tasks and saved memories need to stay exactly as written. So masking only runs on your message and the lead's final answer. The spending check still runs before *every* model call, workers included.
 
-Compaction uses the same split. The transcript you reopen is the full thread. Only the lead's next model call is shortened. A tool call is never sent without its results. If the protected head and tail are already over the line, the turn stops instead of summarizing those messages away.
+**Compression follows the same idea.** When you reopen a chat, you see all of it. Only the lead's next request gets shortened. A tool call is never sent without its results. If the parts that must be kept (start + latest messages) are already too big, the turn stops instead of summarizing them away.
 
-A refusal still emits a turn, so gated prompts show up as traffic. The span does not carry the prompt, the refusal sentence, tool arguments, or the screen note.
+**Blocked messages still get logged.** A refused prompt still creates a trace, so you can see blocked traffic. But the trace never includes the prompt, the refusal message, tool inputs, or what was masked.
 
-Workers stay shallow on purpose: one task, no conversation, no nested spawn, and a hard cap of five in flight. Dependent steps stay with the lead after it reads a result.
+**Workers are kept simple on purpose.** One task each, no chat history, can't create other workers, max 5 at once. If one step depends on another's result, the lead handles it after reading that result.
 
 ## License
 
